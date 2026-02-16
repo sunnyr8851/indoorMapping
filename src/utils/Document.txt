@@ -1,0 +1,2171 @@
+﻿
+AI-TS Passenger + POS App
+Complete Technical & UX Handoff Document
+(React Native, Indoor Positioning, Wayfinding, Delivery Targeting)
+
+0. Purpose of This Document
+This document defines everything needed to implement the passenger + POS application:
+App purpose and responsibilities
+Indoor positioning model (stable movement)
+Wayfinding & navigation
+Tile-based map system
+Delivery targeting
+Screen-by-screen behavior
+File & module responsibilities
+How Figma designs map directly to runtime behavior
+This is a single source of truth.
+
+1. Core Concept (Very Important)
+The app is NOT “GPS-like”
+It is a canvas-based indoor system.
+Everything is defined relative to a 2D canvas:
+Map
+User position
+Movement
+Walkable areas
+Destinations
+Delivery points
+There is no absolute lat/lng at runtime.
+
+2. The Canvas Model (Foundation)
+2.1 What is the Canvas
+For each floor, there is a 2D canvas:
+Coordinate system: (0,0) top-left
+Units: design pixels (same as Figma export)
+Origin, scale, rotation are fixed per floor
+The runtime map is literally the Figma map rendered on screen.
+
+2.2 Figma → Runtime Mapping
+For each floor:
+Figma Element
+Runtime Meaning
+Artboard
+Floor canvas
+Background map
+Visual layer only
+Overlay grid
+Tiles
+Polygons
+Walkable / non-walkable
+Named components
+POIs, Gates, Restaurants
+
+Rule:
+👉 If it exists in Figma, it must exist in runtime with the same coordinates.
+
+3. Tile System (The Heart of Everything)
+3.1 Why Tiles
+Tiles solve:
+Stable positioning
+Walkable logic
+Routing
+Delivery accuracy
+Confidence handling
+Everything important happens at tile level, not pixel level.
+
+3.2 Tile Definition
+Each floor is divided into uniform tiles:
+type Tile = {
+  tileId: string
+  floorId: string
+  x: number        // canvas coordinate
+  y: number
+  width: number
+  height: number
+  walkable: boolean
+  zoneId?: string
+  poiId?: string
+}
+
+Typical sizes:
+Airport: 1.5m × 1.5m or 2m × 2m
+Hotel/mall: 1m × 1m or 1.25m × 1.25m
+
+3.3 Tile Categories
+Tile Type
+Meaning
+Walkable
+Passenger can stand/walk
+Blocked
+Walls, shops, security
+POI
+Gate, restaurant, pickup
+Transition
+Escalator, elevator
+Seating
+Waiting area
+
+
+4. Zones (Human-Readable Location)
+Tiles are grouped into zones.
+type Zone = {
+  zoneId: string
+  floorId: string
+  tileIds: string[]
+  label: string // “Gate G12 Waiting Area”
+}
+
+Zones are what:
+Users understand
+Orders are delivered to
+UI displays
+
+5. User Position Model (Blue Dot)
+5.1 Raw Position
+The positioning engine outputs raw estimates:
+type RawPosition = {
+  floorId: string
+  x: number
+  y: number
+  headingDeg: number
+  speedMps: number
+  confidence: number // 0..1
+  tsMs: number
+}
+
+This is never shown directly.
+
+5.2 Stable Position (What UI Uses)
+type Position = {
+  floorId: string
+  tileId: string
+  x: number
+  y: number
+  headingDeg: number
+  speedMps: number
+  confidence: number
+  mode: 'STATIONARY' | 'MOVING'
+}
+
+
+6. Stable Movement Logic (Non-Negotiable)
+6.1 Two-Mode State Machine
+STATIONARY
+Dot does not drift
+Movement ignored unless strong evidence
+Confidence increases slowly
+MOVING
+Movement follows IMU / dead-reckoning
+Position snapped to walkable tiles
+Wi-Fi corrects drift
+
+6.2 Mode Transitions
+Transition
+Condition
+STATIONARY → MOVING
+speed > threshold for ~1–2s
+MOVING → STATIONARY
+speed < threshold for ~2–4s
+
+
+6.3 Smoothing Rules
+MOVING: EMA alpha ≈ 0.25
+STATIONARY: EMA alpha ≈ 0.00–0.05
+Floor change: hard switch only after sustained confidence
+
+7. Walkable Logic (Critical)
+Every movement step must:
+Resolve target (x,y)
+Map to tile
+Verify tile.walkable === true
+If false → snap to nearest walkable tile
+This prevents:
+Walking through walls
+Cutting across shops
+Teleporting
+
+8. Wayfinding (Navigation)
+8.1 Routing Graph (Tile-Based)
+type RouteNode = {
+  tileId: string
+  neighbors: string[] // adjacent walkable tiles
+}
+
+Routing is:
+A* or Dijkstra on tile graph
+Cost = distance + penalties (crowded, escalators, etc.)
+
+8.2 Route Output
+type Route = {
+  floorId: string
+  path: {x:number,y:number}[]
+  distanceMeters: number
+  etaSeconds: number
+}
+
+Rendered as:
+Polyline overlay on canvas
+
+9. Destination Model
+Destinations are anchored tiles:
+type Destination = {
+  destinationId: string
+  floorId: string
+  tileId: string
+  label: string
+  type: 'GATE' | 'RESTAURANT' | 'PICKUP'
+}
+
+
+10. Delivery Target (For Orders)
+10.1 Why This Exists
+You never deliver to a moving dot.
+You deliver to a stable zone/tile.
+
+10.2 Delivery Target Model
+type DeliveryTarget = {
+  floorId: string
+  zoneId: string
+  tileId?: string
+  label: string
+  confidence: number
+  needsConfirmation: boolean
+}
+
+Rules:
+Updated only if user stays in same zone/tile for N seconds
+If confidence < threshold → ask user to confirm
+UI copy:
+“We’ll deliver to Gate G12 waiting area.
+Is this correct?”
+
+11. Screens (Mapped to Figma Frames)
+Each Figma frame = one screen.
+Screen List
+Attract / Welcome
+Identify (Scan / Manual)
+Consent
+Home (Map + Dot + Nearby)
+Destination Selection
+Wayfinding
+Cart
+Payment (mock)
+Tracking
+Receipt
+Session End
+Dev / Ops Tools
+
+12. Dev / Ops Tools (Must Exist)
+Show raw vs stable position
+Show current tile & zone
+Show confidence
+Toggle “simulate bad Wi-Fi”
+Force floor change
+Provision POS terminal location
+
+13. POS Terminal Location (Separate from User)
+POS terminal:
+Is stationary
+Has its own tile/zone
+Used for:
+Nearby merchant logic
+Sanity check (terminal moved?)
+Same tile model, different entity.
+
+14. File & Module Responsibility Map
+Positioning
+PositioningService → smoothing + mode logic
+TileResolver → x/y → tile
+Native module → sensor fusion
+Wayfinding
+RoutingService → tile graph + path
+MapView → render canvas
+BlueDot → render user
+RouteOverlay → render route
+Orders
+DeliveryTargetService
+OrderService
+
+Extra pointers
+
+5) Indoor positioning: the standard workable algorithm (implement exactly this)
+5.1 Two-mode state machine (must)
+STATIONARY
+dot locked or tiny smoothing
+
+
+ignore micro coordinate changes
+
+
+allow only big “anchor” corrections
+
+
+MOVING
+allow movement updates
+
+
+snap to walkable tiles
+
+
+map-match to corridors if available
+
+
+Transitions
+stationary→moving when speed > 0.35 m/s for ~1–2 seconds OR step count says moving
+
+
+moving→stationary when speed < 0.15 m/s for ~2–4 seconds
+
+
+5.2 Smoothing
+Use EMA smoothing:
+MOVING alpha: 0.25
+
+
+STATIONARY alpha: 0.02 (or lock fully)
+
+
+5.3 Tile snapping
+Every time you compute a dot:
+Convert (x,y) to tile (col,row)
+
+
+If tile not walkable → snap to nearest walkable tile center (BFS radius)
+
+
+Use snapped tile center as displayed dot coordinate (optional small offset allowed)
+
+
+5.4 Zone selection hysteresis (very important)
+Zone changes must not flicker.
+Only switch zone if user stays in new zone for N seconds (e.g. 2–5s) OR confidence is high.
+7) The order flow and how location connects to delivery
+7.1 Key idea
+Ordering uses DeliveryTarget derived from Position.
+7.2 DeliveryTarget generation
+When user is moving, delivery target updates cautiously.
+Update target only if:
+
+
+user stable in same zone/tile for N seconds, OR
+
+
+confidence > threshold (0.6–0.75)
+
+
+If confidence below threshold:
+show confirmation UI:
+
+
+“We’ll deliver to Gate G12 waiting area. Is this correct?”
+
+
+options: Confirm / Choose area manually (zone list)
+
+
+7.3 POS terminal vs passenger location
+Treat them as separate entities:
+POS terminal location is provisioned and fixed (tile/zone)
+
+
+passenger location is dynamic
+
+
+
+8) Screen-by-screen implementation (Figma must match)
+8.1 Attract / Welcome
+Purpose: Start session quickly.
+Primary CTA: “Start / Scan”
+
+
+Secondary: “Manual code”
+
+
+Timeout handling: always return here
+
+
+8.2 Identify (Scan / Manual)
+scan simulated now (until scanner SDK)
+
+
+manual code input
+
+
+on success → Consent screen
+
+
+8.3 Consent
+accept/decline
+
+
+affects sponsored content and data usage
+
+
+continue → Home
+
+
+8.4 Home (MAP-FIRST)
+This is the main screen.
+ Must show:
+Map for current floor
+
+
+Blue dot + confidence
+
+
+Destination shortcut buttons:
+
+
+“My Gate”
+
+
+“Food”
+
+
+“Pickup points”
+
+
+Nearby merchants list (tile/zone filtered)
+
+
+“Cart” entry point
+
+
+“Confirm location” prompt if low confidence
+
+
+8.5 Destination selection
+List + search
+
+
+Categories: Gate / Restaurant / Pickup
+
+
+On select → start route + open Wayfinding view (can be same screen as Home)
+
+
+8.6 Wayfinding
+Map + route overlay
+
+
+destination marker
+
+
+“Recenter” button
+
+
+Distance + ETA
+
+
+8.7 Cart / Checkout
+must display delivery target label
+
+
+if needsConfirmation: block checkout until confirmed
+
+
+8.8 Payment (mock)
+simulate success/fail buttons
+
+
+8.9 Tracking
+show order status
+
+
+update until ready/delivered
+
+
+8.10 Receipt
+print or send (mock)
+
+
+end session
+
+
+8.11 Dev / Ops tools
+Must include:
+raw x/y + stable x/y
+
+
+tileId + zoneId
+
+
+confidence
+
+
+simulate poor signal
+
+
+provision terminal tile/zone
+
+
+toggle offline/degraded
+
+
+
+9) File-by-file structure (frontend must implement this organization)
+9.1 Core
+src/App.tsx navigation + boot
+
+
+src/domain/store/appStore.ts global state
+
+
+src/domain/session/sessionMachine.ts timeouts, reset, lifecycle
+
+
+9.2 Positioning
+src/device/PositioningBridge.ts native events
+
+
+src/domain/positioning/PositioningService.ts smoothing + mode
+
+
+src/domain/positioning/TileResolver.ts (x,y → tile)
+
+
+src/domain/positioning/Snapper.ts nearest walkable
+
+
+src/domain/positioning/ZoneResolver.ts tile→zone + hysteresis
+
+
+9.3 Map rendering
+src/ui/map/MapCanvas.tsx render floor image/SVG
+
+
+src/ui/map/BlueDot.tsx
+
+
+src/ui/map/RouteOverlay.tsx
+
+
+src/ui/map/DestinationMarker.tsx
+
+
+src/ui/map/ViewportController.ts pan/zoom/recenter
+
+
+9.4 Routing
+src/domain/routing/TileGraph.ts build adjacency
+
+
+src/domain/routing/AStar.ts
+
+
+src/domain/routing/RouteService.ts
+
+
+9.5 Delivery targeting
+src/domain/delivery/DeliveryTargetService.ts
+
+
+src/ui/components/ConfirmLocationSheet.tsx
+
+
+9.6 Orders
+src/domain/orders/OrderService.ts
+
+
+src/data/mock/FakeBackend.ts
+
+
+src/data/api/ApiClient.ts (later)
+
+
+9.7 Screens
+src/ui/screens/*
+13) Definition of Done (what you should accept)
+User stands still → dot stable (no jitter)
+
+
+User walks → dot moves smoothly
+
+
+Dot never crosses blocked tiles
+
+
+Route avoids blocked tiles
+
+
+Delivery target shown as zone label + confidence
+
+
+Low confidence blocks checkout until confirmed
+
+
+All screens match Figma frames
+
+
+Dev tools show raw vs stable and tile/zone
+
+
+2) Target behavior (what “good” looks like)
+Two user modes (practical and standard)
+Navigation Mode (Route-locked)  recommended default
+
+
+User selects destination → you compute path.
+
+
+User movement is constrained to the corridor graph / tiles.
+
+
+Direction errors are corrected by “snapping” to path.
+
+
+Free Roam Mode (Exploration)
+
+
+Blue dot moves with PDR but is snapped to nearest walkable corridor.
+
+
+Less strict than route-locked, but still map-matched.
+3) Designer steps (Figma → implementable map spec)
+Your designer must deliver a “Map Pack” per venue/floor. Minimum outputs:
+3.1 Figma layers convention (non-negotiable)
+Create one frame per floor with these layers:
+WALKABLE_MASK (vector polygons)
+
+
+OBSTACLES (polygons)
+
+
+BLOCKED (polygons)
+
+
+POI (pins/labels: gates, lounges, toilets, elevators, shops, etc.)
+
+
+BACKGROUND (visual floor plan)
+
+
+Rule: Walkable mask is the source of truth (corridors, open areas).
+3.2 Coordinate & scale definition (must be explicit)
+Designer must specify:
+Map unit: meters (recommended) or feet (but pick one).
+
+
+At least two known reference points with real-world distance to confirm scale.
+
+
+“Origin” definition (top-left is fine) + axis directions.
+
+
+3.3 Export requirements
+Export SVG (or JSON paths) for masks + POIs.
+
+
+Export a PNG background for rendering.
+4) Engineering steps: convert design to tiles 
+4.1 Build script (offline tool, run in repo)
+Input: walkable/obstacle/blocked polygons from Figma export
+ Output: venue_floor_tiles.json
+Output JSON shape (suggested):
+{
+  "venue_id": "DXB_T3",
+  "floor_id": "L2",
+  "unit": "m",
+  "tile_size_m": 1.0,
+  "cols": 200,
+  "rows": 140,
+  "grid": [0,0,1,0,2,...],
+  "pois": [
+    {"id":"gate_A12","name":"Gate A12","type":"gate","col":120,"row":44},
+    {"id":"wc_1","name":"Toilets","type":"wc","col":88,"row":60}
+  ]
+}
+
+4.2 Tile generation logic
+For each tile center point:
+If inside BLOCKED polygon → 2
+
+
+Else if inside OBSTACLE polygon → 1
+
+
+Else if inside WALKABLE_MASK polygon → 0
+
+
+Else default → 2 (blocked / non-walkable)
+
+
+
+5) Core “completion”: Map-matched PDR (stable movement)
+This is the practical fix for the direction problem without requiring BLE.
+5.1 Add a Positioning State Machine
+Create a single module that owns position:
+States
+IDLE (no session)
+
+
+FREE_ROAM
+
+
+NAVIGATING (route-locked)
+
+
+RECENTERING (user confirmed correction)
+
+
+Events
+DESTINATION_SELECTED
+
+
+STEP_DETECTED
+
+
+HEADING_UPDATED
+
+
+USER_TAP_RECENTER
+
+
+ROUTE_RECALC_REQUEST
+
+
+FLOOR_CHANGED (later)
+
+
+5.2 Step update becomes “proposal → correction”
+Right now you do:
+ pos += step_length * heading_vector
+Change it to:
+Propose new point from IMU:
+
+
+p_proposed = p_current + step_length * heading_vector
+
+
+Map-match correction
+
+
+Snap to nearest walkable tile center within radius R.
+
+
+If NAVIGATING: snap to nearest point on the current path polyline first, then to tile.
+
+
+Sanity gates
+
+
+If the proposed move “jumps through obstacle/blocked” → reject and keep last position.
+
+
+If snap distance > threshold (means bad heading) → reduce step length / trigger recenter hint.
+
+
+5.3 Route-locked correction (solves phone direction mismatch)
+When user is navigating, you know the intended direction from the path.
+For each step:
+Find the closest segment on the path
+
+
+Compute the path’s forward direction there
+
+
+Project the proposed movement onto the path direction
+ (even if phone heading is wrong, movement will still progress along the corridor)
+
+
+This one change makes the dot look “professional” immediately.
+5.4 Drift control rules (simple but effective)
+Gyro drift reset: when user taps “Recenter” or you snap strongly to path, also reset heading to the path direction.
+
+
+Adaptive step length: start with default, then adapt:
+
+
+If user consistently overshoots path by snapping backwards/sideways, reduce step length a bit.
+
+
+If user consistently under-moves, increase slightly.
+
+
+Stationary detection: if accel variance is low for N seconds, don’t integrate gyro aggressively.
+
+
+5.5 Optional (but recommended): magnetometer fusion
+Magnetometer won’t solve “phone in pocket”, but it does reduce long-run yaw drift.
+Use a lightweight complementary filter: gyro for short-term, magnetometer for long-term correction.
+
+
+Still keep route-lock as primary stabilizer.
+
+
+7) Pathfinding upgrades you should add now (airports)
+A* is fine, but airports need:
+7.1 No diagonal corner cutting
+With 8-neighbor moves, you must block diagonal movement if either adjacent cardinal tile is blocked (prevents cutting through furniture/walls).
+7.2 Weighted tiles (optional)
+Add costs:
+Normal corridor: 1.0
+
+
+Crowded zone: 1.3 (later)
+
+
+Escalator/elevator: special edges (multi-floor later)
+
+
+7.3 Path smoothing for UI
+After A* returns tile centers:
+Remove unnecessary intermediate points (line-of-sight compression).
+
+
+Render a clean polyline.
+
+
+A. Route-locked correction (navigation mode)
+Goal
+When a destination route exists, each step should move the dot along the route, even if the phone points the wrong way.
+This is done by:
+finding the closest point on the route to the current position
+using the route’s local direction (tangent) as the movement direction
+moving forward along the route by the step length
+snapping to walkable tiles and updating progress
+
+Data structures
+Route representation (polyline)
+Route is a list of points in meters (recommended) or pixels if you already convert consistently.
+type Vec2 = { x: number; y: number }; // meters
+
+type Route = {
+  points: Vec2[]; // polyline
+  cumulative: number[]; // cumulative length at each point (precomputed)
+  totalLength: number;
+};
+
+Precompute:
+segment vectors
+segment lengths
+cumulative distance along route
+
+Core functions
+1) Closest point on polyline
+Given a point P, find closest point C on the route and the segment index.
+type ClosestOnRoute = {
+  segIndex: number;
+  t: number;          // 0..1 on segment
+  closest: Vec2;      // closest point on route
+  dist: number;       // perpendicular distance to route
+  s: number;          // distance along route from start to closest point
+  tangent: Vec2;      // unit direction along route at that segment
+};
+
+function closestPointOnRoute(P: Vec2, route: Route): ClosestOnRoute
+
+Implementation:
+loop segments A = points[i], B = points[i+1]
+project P onto segment:
+AB = B-A
+t = clamp( dot(P-A, AB) / dot(AB,AB), 0, 1 )
+C = A + t*AB
+track min distance
+tangent = normalize(AB) for the best segment
+compute s from route.cumulative[i] + t*|AB|
+This is standard geometry; no libraries needed.
+
+2) Move forward along the route by step length
+Once you have the closest point C and distance along route s, compute the new target at s + stepLen.
+function pointAtDistance(route: Route, sTarget: number): Vec2
+
+Implementation:
+clamp sTarget to [0, route.totalLength]
+find segment where cumulative[i] <= sTarget <= cumulative[i+1]
+interpolate inside that segment by ratio
+return the interpolated point
+
+Step update logic (navigation mode)
+Inputs:
+pos current stable position (meters)
+route current route polyline (meters)
+stepLen meters (adaptive, see later)
+optional phoneHeading (we will use it only as fallback)
+Process:
+Compute closest point:
+info = closestPointOnRoute(pos, route)
+
+Compute a forward target:
+sNew = info.s + stepLen
+target = pointAtDistance(route, sNew)
+
+Prevent backwards movement:
+Maintain progressS (monotonic). If sNew < progressS, clamp to progressS.
+Snap to walkable:
+Convert target to tile and ensure walkable. If not walkable, snap to nearest walkable tile center within radius.
+Update:
+new pos = snapped target
+progressS = max(progressS, sNew)
+Recompute route-relative values (distance remaining, etc.)
+
+When to re-route
+If the user is too far from the route, route-lock becomes misleading.
+Define:
+OFF_ROUTE_DIST_M = 6 (3 tiles × 2m)
+If info.dist > OFF_ROUTE_DIST_M:
+show “Confirm your location” prompt OR
+temporarily switch to FREE mode until user recenters OR route recalculated
+
+B. Drift control rules
+B1) Heading reset rules
+You keep a heading variable (gyro integrated). It drifts.
+Reset heading when:
+user taps Recenter
+snap-to-route correction is “strong”
+Define “strong” snap:
+if perpendicular distance to route before correction > 4m
+or if you had to snap more than 2 tiles
+Heading reset action:
+set heading to the route tangent direction at the closest segment
+headingRad = atan2(info.tangent.y, info.tangent.x)
+
+This stops yaw drift from accumulating in a direction that fights the route.
+
+B2) Adaptive step length (simple and effective)
+A fixed step length causes drift over time. Adapt it gradually using observed corrections.
+Maintain:
+stepLen (starts at 0.75m)
+bounds [0.55, 0.95]
+Update rule (each step):
+Measure how much correction was needed.
+In NAV mode, you have:
+predicted forward distance: stepLen
+actual movement along route: deltaS = newProgressS - oldProgressS
+lateral error before correction: info.dist
+Use these:
+If user consistently overshoots / corrections are large:
+condition:
+info.dist > 4m OR deltaS < 0.4 * stepLen (meaning you tried to move but got heavily corrected)
+update:
+stepLen = max(stepLen - 0.02, 0.55)
+If user consistently under-moves / progress is too low:
+condition:
+deltaS > 0.95 * stepLen AND info.dist < 2m for several steps
+update:
+stepLen = min(stepLen + 0.01, 0.95)
+Use smoothing so it doesn’t oscillate:
+adjust only after 5 consecutive steps meeting the condition.
+
+B3) Stationary detection (do not integrate drift when still)
+Your step counter already indicates motion. Add a stronger stationary detector:
+Inputs:
+accelerometer magnitude variance over a sliding window (e.g., 1.5 seconds)
+step events
+Rules:
+if no steps for 3 seconds → STATIONARY
+additionally, if accel variance < threshold → treat as STATIONARY even if gyro is noisy
+In STATIONARY:
+do not update position
+stop integrating gyro aggressively:
+either freeze heading
+or integrate at a much lower weight
+This prevents random heading drift while standing.
+
+C. Magnetometer fusion (optional, recommended)
+What it does
+Reduces long-term yaw drift
+Does not solve pocket/phone orientation mismatch
+Works best as a slow correction toward “absolute” yaw
+Implementation approach (complementary filter)
+Maintain:
+gyroHeadingRad (fast, drifts)
+magHeadingRad (absolute, noisy)
+headingRad fused output
+Filter:
+keep gyro for short-term
+slowly pull toward mag
+Constants:
+MAG_BLEND = 0.02 (2% correction per update)
+Update each sensor tick (or at lower rate):
+headingRad = wrapAngle( (1 - MAG_BLEND) * gyroHeadingRad + MAG_BLEND * magHeadingRad )
+
+Important:
+magnetometer heading must be tilt-compensated using accelerometer (many libraries do this; if not available, keep it optional)
+indoors, magnetic interference exists; treat mag as low-confidence unless stable
+Use mag only if:
+magnetometer magnitude is within a sane range and not spiking
+heading changes smoothly for a few seconds
+If not, ignore mag and continue gyro.
+
+D. UX requirements (how it must appear in the app)
+D1) Carry-mode prompt (one-time)
+Trigger:
+when user enters NAV mode for the first time in a session (or first app run)
+UI:
+bottom sheet dialog:
+Title: “Improve accuracy”
+Text: “For best accuracy, hold the phone facing forward while walking.”
+Buttons: “Got it” and “Don’t show again”
+Storage:
+save dontShowCarryPrompt=true in local storage
+do not show again if set
+This is not a dependency; it’s a support message to reduce user complaints.
+
+D2) Recenter button (always visible)
+Placement:
+map screen, top-right or bottom-right floating button
+Flow:
+tap Recenter
+mode changes to “Set my location”
+user taps on the map
+app snaps tap point to nearest walkable tile
+app resets:
+position
+progress on route (if navigating)
+heading (set to route tangent if navigating)
+confidence up to 0.75
+If navigating:
+keep the destination
+recalculate route from new position
+
+D3) Confidence indicator
+Show a small label (top of map or next to blue dot):
+High
+Medium
+Low
+Map it to numbers:
+High: confidence ≥ 0.75 and route distance ≤ 2m (if NAV)
+Medium: 0.50–0.74
+Low: < 0.50 or frequent large snaps
+Also control behavior:
+If Low persists for 8 seconds → show recenter prompt
+If Low during checkout → block checkout until confirmed
+
+E. Complete implementation skeleton
+Create these modules
+routeMath.ts
+closestPointOnRoute
+pointAtDistance
+routeTotalLength
+positionController.ts
+holds state:
+pos
+mode
+confidence
+stepLen
+routeProgressS
+functions:
+setRoute(route)
+clearRoute()
+onStep(stepEvent)
+onHeading(gyroHeading)
+onMagHeading(magHeading) optional
+recenter(tapPoint)
+getUiState()
+mapSnap.ts
+snapToWalkableMeters(posMeters) (internally maps to tiles)
+optional: snapToRoute(posMeters, route)
+ui
+carry prompt sheet
+recenter flow
+confidence badge
+
+F. Values to start with (meters, 2m tiles)
+Off-route threshold: 6m
+Strong snap threshold: 4m
+Step length: start 0.75m, min 0.55m, max 0.95m
+Recenter prompt: confidence < 0.45 for 8s
+EMA: moving 0.25, stationary 0.02
+
+
+
+routeMath.ts (buildRoute, closestPointOnRoute, pointAtDistance)
+mapSnap.ts (snapToWalkableMeters using your grid)
+positionController.ts (route-locked step updates, adaptive step length, stationary detection, confidence, recenter)
+confidence.ts helper
+Minimal UI integration notes (carry prompt, recenter, confidence label)
+You can send this to your dev as “copy these files into the repo and wire 3 hooks”.
+
+1) src/domain/routing/routeMath.ts
+// src/domain/routing/routeMath.ts
+export type Vec2 = { x: number; y: number }; // meters
+
+export type Route = {
+  points: Vec2[];        // meters
+  cumulative: number[];  // meters
+  totalLength: number;   // meters
+};
+
+export type ClosestOnRoute = {
+  segIndex: number;
+  t: number;        // 0..1 along segment
+  closest: Vec2;    // meters
+  dist: number;     // meters
+  s: number;        // meters along route from start
+  tangent: Vec2;    // unit vector
+};
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+const sub = (a: Vec2, b: Vec2): Vec2 => ({ x: a.x - b.x, y: a.y - b.y });
+const add = (a: Vec2, b: Vec2): Vec2 => ({ x: a.x + b.x, y: a.y + b.y });
+const mul = (a: Vec2, k: number): Vec2 => ({ x: a.x * k, y: a.y * k });
+const dot = (a: Vec2, b: Vec2): number => a.x * b.x + a.y * b.y;
+const len = (a: Vec2): number => Math.hypot(a.x, a.y);
+const dist2 = (a: Vec2, b: Vec2): number => {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+};
+const dist = (a: Vec2, b: Vec2): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+const normalize = (a: Vec2): Vec2 => {
+  const l = len(a);
+  if (l < 1e-9) return { x: 1, y: 0 };
+  return { x: a.x / l, y: a.y / l };
+};
+
+export function buildRoute(points: Vec2[]): Route {
+  if (!points || points.length < 2) {
+    return { points: points ?? [], cumulative: [0], totalLength: 0 };
+  }
+  const cumulative: number[] = new Array(points.length).fill(0);
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += dist(points[i - 1], points[i]);
+    cumulative[i] = total;
+  }
+  return { points, cumulative, totalLength: total };
+}
+
+export function closestPointOnRoute(P: Vec2, route: Route): ClosestOnRoute {
+  const pts = route.points;
+  if (!pts || pts.length < 2) {
+    return {
+      segIndex: 0,
+      t: 0,
+      closest: pts?.[0] ?? P,
+      dist: 0,
+      s: 0,
+      tangent: { x: 1, y: 0 },
+    };
+  }
+
+  let bestI = 0;
+  let bestT = 0;
+  let bestC: Vec2 = pts[0];
+  let bestD2 = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const A = pts[i];
+    const B = pts[i + 1];
+    const AB = sub(B, A);
+    const AP = sub(P, A);
+    const denom = dot(AB, AB);
+
+    let t = 0;
+    if (denom > 1e-9) t = clamp(dot(AP, AB) / denom, 0, 1);
+
+    const C = add(A, mul(AB, t));
+    const d2 = dist2(P, C);
+
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      bestI = i;
+      bestT = t;
+      bestC = C;
+    }
+  }
+
+  const A = pts[bestI];
+  const B = pts[bestI + 1];
+  const AB = sub(B, A);
+  const segLen = len(AB);
+  const tangent = normalize(AB);
+
+  const s = (route.cumulative?.[bestI] ?? 0) + bestT * segLen;
+  return {
+    segIndex: bestI,
+    t: bestT,
+    closest: bestC,
+    dist: Math.sqrt(bestD2),
+    s,
+    tangent,
+  };
+}
+
+export function pointAtDistance(route: Route, sTarget: number): Vec2 {
+  const pts = route.points;
+  if (!pts || pts.length === 0) return { x: 0, y: 0 };
+  if (pts.length === 1) return pts[0];
+
+  const s = clamp(sTarget, 0, route.totalLength);
+  const cum = route.cumulative;
+
+  // find i such that cum[i] <= s <= cum[i+1]
+  let i = 0;
+  while (i < cum.length - 2 && cum[i + 1] < s) i++;
+
+  const s0 = cum[i];
+  const s1 = cum[i + 1];
+  const segLen = Math.max(1e-9, s1 - s0);
+  const ratio = clamp((s - s0) / segLen, 0, 1);
+
+  const A = pts[i];
+  const B = pts[i + 1];
+  return { x: A.x + (B.x - A.x) * ratio, y: A.y + (B.y - A.y) * ratio };
+}
+
+
+2) src/domain/map/mapSnap.ts
+This assumes you already have a grid (0=walkable, 1=obstacle, 2=blocked) and a way to know floor width/height.
+// src/domain/map/mapSnap.ts
+import type { Vec2 } from "../routing/routeMath";
+
+export type GridLike = {
+  cols: number;
+  rows: number;
+  // 0 walkable, 1 obstacle, 2 blocked
+  getCell: (col: number, row: number) => number;
+};
+
+export type SnapConfig = {
+  tileSizeM: number; // 2.0
+  radiusTiles: number; // 3
+};
+
+const isWalkable = (v: number) => v === 0;
+
+export function metersToTile(p: Vec2, tileSizeM: number) {
+  const col = Math.floor(p.x / tileSizeM);
+  const row = Math.floor(p.y / tileSizeM);
+  return { col, row };
+}
+
+export function tileCenterMeters(col: number, row: number, tileSizeM: number): Vec2 {
+  return {
+    x: (col + 0.5) * tileSizeM,
+    y: (row + 0.5) * tileSizeM,
+  };
+}
+
+export function snapToWalkableMeters(
+  p: Vec2,
+  grid: GridLike,
+  cfg: SnapConfig
+): { snapped: Vec2; snapDistM: number; snappedCol: number; snappedRow: number } {
+  const { tileSizeM, radiusTiles } = cfg;
+
+  // clamp to bounds
+  const col0 = Math.max(0, Math.min(grid.cols - 1, Math.floor(p.x / tileSizeM)));
+  const row0 = Math.max(0, Math.min(grid.rows - 1, Math.floor(p.y / tileSizeM)));
+
+  const v0 = grid.getCell(col0, row0);
+  if (isWalkable(v0)) {
+    const c = tileCenterMeters(col0, row0, tileSizeM);
+    return { snapped: c, snapDistM: dist(p, c), snappedCol: col0, snappedRow: row0 };
+  }
+
+  // BFS ring search for nearest walkable
+  let best: { col: number; row: number; d2: number } | null = null;
+
+  for (let r = 1; r <= radiusTiles; r++) {
+    for (let dc = -r; dc <= r; dc++) {
+      const candidates = [
+        { col: col0 + dc, row: row0 - r },
+        { col: col0 + dc, row: row0 + r },
+      ];
+      for (const cnd of candidates) {
+        if (cnd.col < 0 || cnd.col >= grid.cols || cnd.row < 0 || cnd.row >= grid.rows) continue;
+        if (!isWalkable(grid.getCell(cnd.col, cnd.row))) continue;
+        const c = tileCenterMeters(cnd.col, cnd.row, tileSizeM);
+        const d2 = dist2(p, c);
+        if (!best || d2 < best.d2) best = { col: cnd.col, row: cnd.row, d2 };
+      }
+    }
+    for (let dr = -r + 1; dr <= r - 1; dr++) {
+      const candidates = [
+        { col: col0 - r, row: row0 + dr },
+        { col: col0 + r, row: row0 + dr },
+      ];
+      for (const cnd of candidates) {
+        if (cnd.col < 0 || cnd.col >= grid.cols || cnd.row < 0 || cnd.row >= grid.rows) continue;
+        if (!isWalkable(grid.getCell(cnd.col, cnd.row))) continue;
+        const c = tileCenterMeters(cnd.col, cnd.row, tileSizeM);
+        const d2 = dist2(p, c);
+        if (!best || d2 < best.d2) best = { col: cnd.col, row: cnd.row, d2 };
+      }
+    }
+    if (best) break;
+  }
+
+  if (!best) {
+    const fallback = tileCenterMeters(col0, row0, tileSizeM);
+    return { snapped: fallback, snapDistM: dist(p, fallback), snappedCol: col0, snappedRow: row0 };
+  }
+
+  const snapped = tileCenterMeters(best.col, best.row, tileSizeM);
+  return { snapped, snapDistM: Math.sqrt(best.d2), snappedCol: best.col, snappedRow: best.row };
+}
+
+function dist(a: Vec2, b: Vec2) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+function dist2(a: Vec2, b: Vec2) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
+
+3) src/domain/position/positionController.ts
+This is the “one go” controller. It supports:
+route locked steps
+off-route detection
+recenter
+stationary
+confidence
+adaptive step length
+heading reset to route tangent (for arrow UI)
+// src/domain/position/positionController.ts
+import type { Vec2, Route, ClosestOnRoute } from "../routing/routeMath";
+import { buildRoute, closestPointOnRoute, pointAtDistance } from "../routing/routeMath";
+import type { GridLike, SnapConfig } from "../map/mapSnap";
+import { snapToWalkableMeters } from "../map/mapSnap";
+
+export type Mode = "STATIONARY" | "MOVING_FREE" | "MOVING_NAV";
+
+export type PositionState = {
+  pos: Vec2;              // meters (stable)
+  mode: Mode;
+  confidence: number;     // 0..1
+  stepLenM: number;       // meters
+  route: Route | null;
+  routeProgressS: number; // meters, monotonic
+  lastStepAtMs: number;
+  headingRad: number;     // for UI arrow (not used for NAV movement)
+  lowConfSinceMs: number | null;
+  offRoute: boolean;
+};
+
+export type PositionControllerDeps = {
+  grid: GridLike;
+  snapCfg: SnapConfig; // { tileSizeM:2, radiusTiles:3 }
+  onNeedRecenter?: () => void;        // UI hook
+  onOffRoute?: () => void;            // UI hook
+};
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const wrapAngle = (a: number) => {
+  const twoPi = Math.PI * 2;
+  let x = a % twoPi;
+  if (x < 0) x += twoPi;
+  return x;
+};
+
+const OFF_ROUTE_DIST_M = 6.0;          // 3 tiles
+const STRONG_SNAP_DIST_M = 4.0;        // 2 tiles
+const STATIONARY_NO_STEPS_MS = 3000;
+const CONF_MIN = 0.10;
+const CONF_MAX = 0.95;
+const CONF_RECENTER_PROMPT = 0.45;
+const CONF_RECENTER_HOLD_MS = 8000;
+
+const STEP_LEN_START = 0.75;
+const STEP_LEN_MIN = 0.55;
+const STEP_LEN_MAX = 0.95;
+
+export class PositionController {
+  private s: PositionState;
+  private deps: PositionControllerDeps;
+
+  // adaptive tuning counters
+  private overshootCount = 0;
+  private undershootCount = 0;
+
+  constructor(initialPosMeters: Vec2, deps: PositionControllerDeps) {
+    this.deps = deps;
+    this.s = {
+      pos: initialPosMeters,
+      mode: "STATIONARY",
+      confidence: 0.7,
+      stepLenM: STEP_LEN_START,
+      route: null,
+      routeProgressS: 0,
+      lastStepAtMs: 0,
+      headingRad: 0,
+      lowConfSinceMs: null,
+      offRoute: false,
+    };
+  }
+
+  getState(): PositionState {
+    return { ...this.s };
+  }
+
+  setRoute(pointsMeters: Vec2[]) {
+    const route = buildRoute(pointsMeters);
+    this.s.route = route;
+    this.s.mode = "MOVING_NAV"; // will revert to stationary if no steps
+    // align progress to closest on route
+    const info = closestPointOnRoute(this.s.pos, route);
+    this.s.routeProgressS = info.s;
+    this.resetHeadingToRoute(info);
+    this.s.offRoute = false;
+  }
+
+  clearRoute() {
+    this.s.route = null;
+    this.s.routeProgressS = 0;
+    this.s.offRoute = false;
+    this.s.mode = "MOVING_FREE";
+  }
+
+  /** Call this when your step detector fires. */
+  onStep(nowMs: number) {
+    this.s.lastStepAtMs = nowMs;
+
+    // Determine mode
+    if (this.s.route) this.s.mode = "MOVING_NAV";
+    else this.s.mode = "MOVING_FREE"; // (free mode movement can stay as your old logic if you want)
+
+    if (this.s.mode === "MOVING_NAV") {
+      this.applyNavStep(nowMs);
+      return;
+    }
+
+    // MOVING_FREE: keep your existing “phone heading movement” or implement later.
+    // For now, do nothing here to avoid breaking current behavior.
+  }
+
+  /** Call periodically (e.g., every 250ms) to update stationary status & low-conf timers */
+  tick(nowMs: number) {
+    if (this.s.lastStepAtMs > 0 && nowMs - this.s.lastStepAtMs >= STATIONARY_NO_STEPS_MS) {
+      this.s.mode = "STATIONARY";
+    }
+
+    if (this.s.confidence < CONF_RECENTER_PROMPT) {
+      if (this.s.lowConfSinceMs == null) this.s.lowConfSinceMs = nowMs;
+      if (nowMs - this.s.lowConfSinceMs >= CONF_RECENTER_HOLD_MS) {
+        this.deps.onNeedRecenter?.();
+      }
+    } else {
+      this.s.lowConfSinceMs = null;
+    }
+  }
+
+  /** Optional: update heading from gyro integration for UI arrow */
+  onHeading(gyroHeadingRad: number) {
+    this.s.headingRad = wrapAngle(gyroHeadingRad);
+  }
+
+  /** Optional: magnetometer fused heading could be set here */
+  onMagHeading(fusedHeadingRad: number) {
+    this.s.headingRad = wrapAngle(fusedHeadingRad);
+  }
+
+  /** Called when user taps the map to set location */
+  recenter(tapMeters: Vec2) {
+    const snapped = this.snapAndSet(tapMeters);
+    this.s.pos = snapped.snapped;
+    this.s.confidence = 0.75;
+    this.s.offRoute = false;
+
+    if (this.s.route) {
+      const info = closestPointOnRoute(this.s.pos, this.s.route);
+      this.s.routeProgressS = info.s;
+      this.resetHeadingToRoute(info);
+    }
+  }
+
+  // -------------------------
+  // Internal: NAV step
+  // -------------------------
+  private applyNavStep(nowMs: number) {
+    const route = this.s.route!;
+    const prevProgress = this.s.routeProgressS;
+
+    const info = closestPointOnRoute(this.s.pos, route);
+
+    // Off-route guard
+    if (info.dist > OFF_ROUTE_DIST_M) {
+      this.s.offRoute = true;
+      this.s.confidence = clamp(this.s.confidence - 0.1, CONF_MIN, CONF_MAX);
+      this.deps.onOffRoute?.();
+      // Do not move forward when far off-route; require recenter or reroute.
+      return;
+    }
+    this.s.offRoute = false;
+
+    // Move forward along route
+    let sNew = info.s + this.s.stepLenM;
+    if (sNew < this.s.routeProgressS) sNew = this.s.routeProgressS;
+
+    const target = pointAtDistance(route, sNew);
+    const snapped = this.snapAndSet(target);
+
+    // Commit
+    this.s.pos = snapped.snapped;
+    this.s.routeProgressS = Math.max(this.s.routeProgressS, sNew);
+
+    // Drift control: if strong correction, reset heading to route tangent
+    if (info.dist > STRONG_SNAP_DIST_M || snapped.snapDistM > STRONG_SNAP_DIST_M) {
+      this.resetHeadingToRoute(info);
+    }
+
+    // Update confidence
+    this.updateConfidence(info.dist, snapped.snapDistM, nowMs);
+
+    // Adaptive step length (after confidence update)
+    const deltaS = this.s.routeProgressS - prevProgress;
+    this.updateAdaptiveStepLength(info.dist, deltaS);
+  }
+
+  private snapAndSet(pMeters: Vec2) {
+    return snapToWalkableMeters(pMeters, this.deps.grid, this.deps.snapCfg);
+  }
+
+  private resetHeadingToRoute(info: ClosestOnRoute) {
+    const heading = Math.atan2(info.tangent.y, info.tangent.x);
+    this.s.headingRad = wrapAngle(heading);
+  }
+
+  private updateConfidence(routeDistM: number, snapDistM: number, nowMs: number) {
+    // simple starter rules (tune later)
+    let c = this.s.confidence;
+
+    // route alignment dominates
+    if (routeDistM <= 2) c += 0.02;
+    else if (routeDistM <= 4) c -= 0.03;
+    else c -= 0.10;
+
+    // snapping penalty (if snapping far, we’re uncertain)
+    if (snapDistM > 4) c -= 0.10;
+    else if (snapDistM > 2) c -= 0.03;
+
+    this.s.confidence = clamp(c, CONF_MIN, CONF_MAX);
+
+    // low confidence timer handled in tick()
+    if (this.s.confidence >= CONF_RECENTER_PROMPT) this.s.lowConfSinceMs = null;
+  }
+
+  private updateAdaptiveStepLength(routeDistM: number, deltaS: number) {
+    // Overshoot: big lateral error or poor forward progress
+    const overshoot = routeDistM > 4 || deltaS < 0.4 * this.s.stepLenM;
+    if (overshoot) this.overshootCount++;
+    else this.overshootCount = 0;
+
+    if (this.overshootCount >= 5) {
+      this.s.stepLenM = Math.max(this.s.stepLenM - 0.02, STEP_LEN_MIN);
+      this.overshootCount = 0;
+      this.undershootCount = 0;
+      return;
+    }
+
+    // Undershoot: good alignment but we’re not moving enough
+    const undershoot = deltaS > 0.95 * this.s.stepLenM && routeDistM < 2;
+    if (undershoot) this.undershootCount++;
+    else this.undershootCount = 0;
+
+    if (this.undershootCount >= 5) {
+      this.s.stepLenM = Math.min(this.s.stepLenM + 0.01, STEP_LEN_MAX);
+      this.undershootCount = 0;
+      this.overshootCount = 0;
+    }
+  }
+}
+
+
+4) Wiring instructions 
+Hook 1 — Provide the grid
+Create an adapter from your existing grid:
+const gridAdapter: GridLike = {
+  cols,
+  rows,
+  getCell: (c, r) => grid[r][c], // or grid[c][r] depending on your storage
+};
+
+Hook 2 — Fire onStep()
+Wherever your step detector triggers, call:
+posController.onStep(Date.now());
+
+Also call tick() on an interval:
+setInterval(() => posController.tick(Date.now()), 250);
+
+Hook 3 — Recenter
+When user taps map during recenter flow, convert tap → meters and call:
+posController.recenter(tapMeters);
+
+
+5) Carry prompt + confidence badge (UI behavior)
+On entering navigation (setRoute()), show prompt once:
+store dontShowCarryPrompt in local storage.
+Confidence badge:
+High: >= 0.75
+Medium: 0.50–0.74
+Low: < 0.50
+If onNeedRecenter() fires, show “Location uncertain → please recenter”.
+
+If there’s no active route, you can still keep the dot stable, but you must switch mindset:
+IMU/PDR gives you relative movement (step-by-step)
+Wi-Fi RSSI gives you absolute-ish anchors (zone / coarse position)
+Map constraints prevent impossible movement (walls, blocked tiles)
+So the non-routing solution is:
+PDR prediction + map snap + RSSI anchor correction (zone-based).
+No BLE/UWB needed.
+
+1) What you can do without routing (what actually works)
+A) “Free roam” mode (no destination)
+The dot moves using PDR steps, but every step is corrected by:
+snap to walkable tiles
+corridor/area snapping (stay in walkable graph)
+periodic RSSI anchor correction (recenter softly)
+This is exactly how you make it usable.
+
+2) Why RSSI alone won’t give a smooth dot
+Plain RSSI trilateration is not stable indoors because:
+RSSI fluctuates heavily (multipath, bodies, walls)
+path loss models aren’t accurate per venue
+you’ll get jumping coordinates
+So you should not try to compute “x,y” directly from RSSI.
+What you do instead:
+Use RSSI to classify the user into a zone / tile cluster with a confidence score
+Let PDR handle smooth movement within that zone
+
+3) Practical positioning stack without routing (recommended)
+Layer 1 — Start anchor (mandatory)
+You need a starting point:
+manual “Set my location” tap (always available)
+or “known entry anchor” (kiosk start position)
+or Wi-Fi zone detection (if ready)
+Without an initial anchor, PDR has no reference.
+Layer 2 — PDR step updates (smooth movement)
+On each step:
+propose move using current heading + step length
+snap to nearest walkable tile
+apply smoothing
+Layer 3 — Map matching (keeps it believable)
+Even without a route, you still “map match”:
+If proposed movement hits blocked tiles, search alternative headings (0/180/±90) and pick the one that stays on walkable tiles.
+Snap to corridor center (tile centers are enough with 2m tiles).
+This alone improves pocket/backwards cases.
+Layer 4 — RSSI anchor correction (prevents drift)
+Every 2–5 seconds:
+scan Wi-Fi RSSI list
+classify zone (or nearest fingerprint)
+if confidence is high, gently pull dot toward zone’s anchor point
+do not jump hard unless confidence is very high
+
+4) How to implement RSSI anchor (the simplest working approach)
+Option A (fastest, good enough): Zone classification
+Pre-define zones (gate areas, food court, security, etc.).
+For each zone, store expected RSSI values per AP (a fingerprint).
+At runtime:
+scan visible APs (BSSID + RSSI)
+compare to each zone’s fingerprint
+pick best match + confidence
+anchor correction:
+if high confidence: move dot 30–60% toward zone center
+if medium: move dot 10–20% toward zone center
+if low: ignore
+This is easy and stable.
+Option B (more precise): Tile-level fingerprinting
+Same as above but fingerprints per tile (or per tile cluster).
+Better accuracy, more data collection effort.
+
+5) The free-roam algorithm (what your dev should do)
+Every step (PDR)
+generate candidate headings: h, h+180, h±90
+for each candidate:
+move by stepLen
+snap to walkable
+score by:
+minimal snap distance
+minimal heading flip
+staying in same corridor/zone
+choose best candidate and commit
+Every Wi-Fi scan (RSSI anchor)
+compute anchor = {x,y, confidence}
+if confidence >= 0.8:
+pos = lerp(pos, anchor, 0.6)
+else if confidence >= 0.6:
+pos = lerp(pos, anchor, 0.2)
+else:
+ignore
+Always snap to walkable after correction.
+
+
+Movement rule (final):
+In NAVIGATING mode, each step advances the dot along the route polyline by stepLenM, regardless of phone heading.
+
+
+In FREE_ROAM mode, each step tests 4 directions (h, h+180, h±90), snaps each result to walkable tiles, and commits the direction that produces the smallest correction and most stable corridor continuity.
+
+
+Anchoring rule (final):
+Wi-Fi RSSI is not used for x/y trilateration. It is used only for zone/tile-cluster matching, producing {anchorX, anchorY, confidence}. Position is softly blended toward the anchor and then snapped to walkable tiles.
+
+
+1) PDR Step Movement Formula
+1.1 Step proposal (IMU)
+When a step is detected:
+Δx = stepLen * cos(headingRad)
+Δy = stepLen * sin(headingRad)
+
+p_proposed = {
+  x: p_current.x + Δx
+  y: p_current.y + Δy
+}
+
+Where:
+stepLen = e.g. 0.75 meters
+headingRad = gyro-integrated yaw (in radians)
+
+2) Free-Roam Candidate Heading Correction
+Instead of trusting phone heading blindly:
+2.1 Generate 4 candidate headings
+H0 = h
+H1 = h + π
+H2 = h + π/2
+H3 = h - π/2
+
+
+2.2 For each candidate Hi
+Compute:
+Δxi = stepLen * cos(Hi)
+Δyi = stepLen * sin(Hi)
+
+p_i = p_current + (Δxi, Δyi)
+
+Then snap to walkable:
+p_i_snapped = snapToWalkable(p_i)
+snapDist_i = distance(p_i, p_i_snapped)
+
+
+2.3 Score each candidate
+Score function:
+score_i =
+  w_snap * snapDist_i
++ w_heading * |angleDiff(Hi, lastCommittedHeading)|
++ w_zone * zonePenalty
+
+Typical weights:
+w_snap = 1.0
+w_heading = 0.3
+w_zone = 0.5
+
+Lower score = better candidate.
+Choose the candidate with minimum score.
+Commit:
+p_new = p_best_snapped
+heading = Hi_best
+
+That’s the free-roam correction formula.
+
+3) Snap To Walkable Formula
+Convert meters → tile:
+col = floor(x / tileSize)
+row = floor(y / tileSize)
+
+If tile is walkable → use tile center:
+x_snapped = (col + 0.5) * tileSize
+y_snapped = (row + 0.5) * tileSize
+
+If not walkable:
+Search neighbors in increasing radius R:
+for r = 1..maxRadius:
+   check ring tiles
+   choose tile with minimum distance to p_proposed
+
+Distance formula:
+d = sqrt((x1-x2)^2 + (y1-y2)^2)
+
+
+4) RSSI Anchor Confidence Formula
+Do NOT trilaterate directly.
+Instead use fingerprint similarity.
+4.1 Fingerprint match score
+For each zone:
+error = Σ |RSSI_live(AP_i) - RSSI_zone(AP_i)|
+
+Lower error = better match.
+Convert error to confidence:
+confidence = exp(-error / K)
+
+Where:
+K ≈ 30–50 (tune)
+So:
+Small error → confidence near 1
+Large error → confidence near 0
+
+4.2 Anchor blending formula
+If confidence ≥ 0.8:
+p_new = (1 - 0.6) * p_current + 0.6 * anchor
+
+If confidence ≥ 0.6:
+p_new = (1 - 0.2) * p_current + 0.2 * anchor
+
+Else ignore.
+This is simple linear interpolation (LERP):
+p_new = p_current + α * (anchor - p_current)
+
+
+5) Route-Locked Projection Formula
+When navigating:
+Find closest point on route:
+Projection of P onto segment AB:
+t = clamp( dot(P-A, B-A) / dot(B-A, B-A), 0, 1 )
+C = A + t*(B-A)
+
+Forward movement:
+s_new = s_current + stepLen
+p_new = routePointAtDistance(s_new)
+
+Ignore phone heading completely.
+That’s the professional correction formula.
+
+6) EMA Smoothing Formula
+For movement:
+p_smooth = α * p_new + (1 - α) * p_prev
+
+Use:
+MOVING α = 0.25
+STATIONARY α = 0.02
+
+7) Stationary Detection Formula
+Compute accelerometer magnitude:
+mag = sqrt(ax^2 + ay^2 + az^2)
+
+Variance over sliding window:
+var = average((mag - mean)^2)
+
+If:
+var < threshold AND no steps for 3 seconds
+
+→ STATIONARY
+
+6) What accuracy to expect (honest)
+Without routing and without UWB/BLE:
+You can get a stable dot that stays in corridors and roughly follows the user
+You typically get zone-level accuracy (which is what matters for “near you” and “delivery area”)
+Exact “within 1–2 meters always” is unrealistic with Wi-Fi RSSI
+
+7) should ship first
+For “person just moving” with no destination:
+Manual recenter (tap map)
+PDR + candidate headings + snap to walkable
+Stationary lock
+Optional Wi-Fi zone anchor correction (if you can collect fingerprints)
+This is the fastest workable stack.
+
+
+—--------------------------------------
+
+
+
+
+Implementation Addendum: 
+0) Assumptions (keep consistent)
+All internal logic uses meters.
+Map render uses canvas pixels.
+Floor has a scale: pxPerMeter.
+Tile size: tileSizeM = 2.
+
+1) Figma pixels ↔ meters mapping (required)
+1.1 What you store per floor
+Create src/data/floors/FLOOR_CONFIG.ts:
+export const FLOOR_CONFIG = {
+  floorId: "OFFICE_L1",
+  pxPerMeter: 20,          // example: derived from reference measurement
+  tileSizeM: 2,
+  originPx: { x: 0, y: 0 } // top-left; keep 0,0 unless you add offsets
+};
+
+1.2 Convert functions
+Create src/domain/map/units.ts:
+import { FLOOR_CONFIG } from "../../data/floors/FLOOR_CONFIG";
+
+export type Vec2 = { x: number; y: number };
+
+export function metersToPx(m: Vec2): Vec2 {
+  const s = FLOOR_CONFIG.pxPerMeter;
+  return { x: m.x * s + FLOOR_CONFIG.originPx.x, y: m.y * s + FLOOR_CONFIG.originPx.y };
+}
+
+export function pxToMeters(p: Vec2): Vec2 {
+  const s = FLOOR_CONFIG.pxPerMeter;
+  return { x: (p.x - FLOOR_CONFIG.originPx.x) / s, y: (p.y - FLOOR_CONFIG.originPx.y) / s };
+}
+
+Where pxPerMeter comes from (designer gives you):
+Pick two points in Figma that correspond to a real distance (e.g., corridor length).
+Measure pixel distance in Figma.
+pxPerMeter = pixelDistance / realDistanceMeters
+
+2) Heading from gyro (exact code)
+2.1 Install a sensor package
+Use react-native-sensors (works outside Expo easily).
+Install
+npm i react-native-sensors
+(Android: ensure gradle config if needed)
+2.2 Gyro integration → heading radians
+Create src/device/sensors/headingGyro.ts:
+import { gyroscope, setUpdateIntervalForType, SensorTypes } from "react-native-sensors";
+
+type HeadingListener = (headingRad: number) => void;
+
+const TWO_PI = Math.PI * 2;
+
+function wrapAngle(a: number) {
+  let x = a % TWO_PI;
+  if (x < 0) x += TWO_PI;
+  return x;
+}
+
+export function startGyroHeading(onHeading: HeadingListener) {
+  setUpdateIntervalForType(SensorTypes.gyroscope, 50); // 20Hz
+
+  let heading = 0;            // radians
+  let lastTs = Date.now();
+
+  const sub = gyroscope.subscribe(({ x, y, z, timestamp }) => {
+    // timestamp from library may be ms or ns depending; safest is to use Date.now dt
+    const now = Date.now();
+    const dt = Math.max(0.001, (now - lastTs) / 1000);
+    lastTs = now;
+
+    // z is yaw rate when device is upright; sign may be inverted on some devices
+    heading = wrapAngle(heading + z * dt);
+    onHeading(heading);
+  });
+
+  return () => sub.unsubscribe();
+}
+
+Important notes for the dev
+This is relative heading and will drift. That’s ok.
+In NAV mode we don’t rely on it for movement; it’s mainly for FREE roam proposals + arrow UI.
+If sign is reversed on the POS device, invert z once: heading + (-z)*dt.
+
+3) Step detection (exact code)
+Create src/device/sensors/stepDetector.ts:
+import { accelerometer, setUpdateIntervalForType, SensorTypes } from "react-native-sensors";
+
+type StepListener = (tsMs: number) => void;
+
+export function startStepDetector(onStep: StepListener) {
+  setUpdateIntervalForType(SensorTypes.accelerometer, 50); // 20Hz
+
+  // Simple peak detector on accel magnitude
+  const THRESH = 1.15;       // tune per device; start here
+  const COOLDOWN_MS = 300;   // min time between steps
+  const SMOOTH = 0.2;
+
+  let lastStep = 0;
+  let ema = 0;
+  let rising = false;
+
+  const sub = accelerometer.subscribe(({ x, y, z }) => {
+    const mag = Math.sqrt(x * x + y * y + z * z); // includes gravity in g-units
+    ema = ema * (1 - SMOOTH) + mag * SMOOTH;
+
+    const now = Date.now();
+
+    if (!rising && ema > THRESH) {
+      rising = true;
+    }
+
+    if (rising && ema < THRESH) {
+      rising = false;
+      if (now - lastStep >= COOLDOWN_MS) {
+        lastStep = now;
+        onStep(now);
+      }
+    }
+  });
+
+  return () => sub.unsubscribe();
+}
+
+Tune guidance
+If it misses steps: reduce THRESH slightly (e.g., 1.10)
+If it double counts: increase COOLDOWN_MS (e.g., 350–400)
+
+4) FREE-ROAM movement (candidate headings) — exact code
+You already have the NAV controller. This adds FREE roam behavior.
+Create src/domain/position/freeRoamStep.ts:
+import type { Vec2 } from "../routing/routeMath";
+import { snapToWalkableMeters } from "../map/mapSnap";
+import type { GridLike, SnapConfig } from "../map/mapSnap";
+
+function angleDiff(a: number, b: number) {
+  const d = Math.atan2(Math.sin(a - b), Math.cos(a - b));
+  return Math.abs(d); // 0..pi
+}
+
+export function applyFreeRoamStep(args: {
+  pos: Vec2;
+  headingRad: number;
+  lastChosenHeadingRad: number;
+  stepLenM: number;
+  grid: GridLike;
+  snapCfg: SnapConfig;
+  // optional zone function
+  getZoneId?: (p: Vec2) => string | null;
+}) {
+  const {
+    pos, headingRad, lastChosenHeadingRad, stepLenM,
+    grid, snapCfg, getZoneId
+  } = args;
+
+  const candidates = [
+    headingRad,
+    headingRad + Math.PI,
+    headingRad + Math.PI / 2,
+    headingRad - Math.PI / 2,
+  ];
+
+  const startZone = getZoneId?.(pos) ?? null;
+
+  let best = {
+    heading: candidates[0],
+    snapped: pos,
+    snapDist: Number.POSITIVE_INFINITY,
+    score: Number.POSITIVE_INFINITY,
+    zone: startZone,
+  };
+
+  for (const h of candidates) {
+    const proposed: Vec2 = {
+      x: pos.x + stepLenM * Math.cos(h),
+      y: pos.y + stepLenM * Math.sin(h),
+    };
+
+    const snappedRes = snapToWalkableMeters(proposed, grid, snapCfg);
+    const snapped = snappedRes.snapped;
+
+    const snapDist = snappedRes.snapDistM;
+    const flipPenalty = angleDiff(h, lastChosenHeadingRad); // 0..pi
+    const zone = getZoneId?.(snapped) ?? null;
+    const zonePenalty = (startZone && zone && startZone !== zone) ? 1 : 0;
+
+    // scoring weights (keep stable)
+    const score = snapDist * 3.0 + flipPenalty * 0.8 + zonePenalty * 2.0;
+
+    if (score < best.score) {
+      best = { heading: h, snapped, snapDist, score, zone };
+    }
+  }
+
+  return {
+    newPos: best.snapped,
+    chosenHeadingRad: best.heading,
+    snapDistM: best.snapDist,
+  };
+}
+
+How to wire this into your PositionController
+In PositionController.onStep() for MOVING_FREE, call applyFreeRoamStep() and commit returned values.
+That’s it.
+
+5) Wi-Fi RSSI anchor (the simplest “works in venue” approach)
+5.1 Reality check (Android permissions)
+On Android, scanning Wi-Fi requires:
+location permission
+location services enabled
+and sometimes vendor restrictions on POS devices
+So implement this as optional: if scan fails, app still works with PDR + map snap.
+5.2 Data format (zone fingerprints)
+Create src/data/wifi/zoneFingerprints.json like:
+{
+  "zones": [
+    {
+      "zoneId": "GATE_A12",
+      "anchorMeters": { "x": 120.0, "y": 88.0 },
+      "fingerprint": {
+        "AA:BB:CC:DD:EE:01": -55,
+        "AA:BB:CC:DD:EE:02": -62
+      }
+    },
+    {
+      "zoneId": "FOOD_COURT",
+      "anchorMeters": { "x": 60.0, "y": 40.0 },
+      "fingerprint": {
+        "AA:BB:CC:DD:EE:03": -50,
+        "AA:BB:CC:DD:EE:04": -66
+      }
+    }
+  ]
+}
+
+5.3 Matching function (returns anchor + confidence)
+Create src/domain/wifi/zoneMatch.ts:
+type Scan = Record<string, number>; // BSSID -> RSSI
+
+type Zone = {
+  zoneId: string;
+  anchorMeters: { x: number; y: number };
+  fingerprint: Record<string, number>;
+};
+
+export function matchZone(scan: Scan, zones: Zone[]) {
+  let bestZone: Zone | null = null;
+  let bestScore = -Infinity;
+
+  for (const z of zones) {
+    // score: compare only APs that are present in both scan and fingerprint
+    let count = 0;
+    let errorSum = 0;
+
+    for (const bssid of Object.keys(z.fingerprint)) {
+      if (scan[bssid] == null) continue;
+      count++;
+      const expected = z.fingerprint[bssid];
+      const observed = scan[bssid];
+      errorSum += Math.abs(observed - expected);
+    }
+
+    if (count < 2) continue; // not enough overlap, skip
+
+    const avgError = errorSum / count; // smaller is better
+    const score = -avgError;           // larger is better
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestZone = z;
+    }
+  }
+
+  if (!bestZone) return null;
+
+  // convert avgError to confidence (simple mapping)
+  // avgError ~ 5-8 = good, 12+ = weak
+  const avgError = -bestScore;
+  let confidence = 1 - Math.min(avgError / 20, 1); // 0..1
+  confidence = Math.max(0, Math.min(1, confidence));
+
+  return {
+    zoneId: bestZone.zoneId,
+    anchorMeters: bestZone.anchorMeters,
+    confidence,
+  };
+}
+
+5.4 Apply anchor correction
+In your positioning tick (every 2–5 seconds):
+match zone
+apply blend based on confidence
+snap to walkable again
+function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+
+export function applyWifiAnchor(pos: {x:number,y:number}, anchor: {x:number,y:number}, confidence: number) {
+  if (confidence >= 0.8) {
+    return { x: lerp(pos.x, anchor.x, 0.6), y: lerp(pos.y, anchor.y, 0.6) };
+  }
+  if (confidence >= 0.6) {
+    return { x: lerp(pos.x, anchor.x, 0.2), y: lerp(pos.y, anchor.y, 0.2) };
+  }
+  return pos;
+}
+
+
+6) Confirm: does your document already cover this?
+Yes, conceptually it covers:
+canvas model
+tiles & zones
+state machine
+snapping rules
+route locked movement
+delivery targeting + confirmation
+screen list + dev tools
+module map
+Missing pieces that I added above:
+px↔meters conversion code
+gyro heading integration code
+step detector code
+free-roam candidate heading code
+zone fingerprint data shape + match code
+exact wiring points
+If you paste this addendum into your handoff, your dev can implement without asking “how do I actually get heading/steps/anchor”.
+

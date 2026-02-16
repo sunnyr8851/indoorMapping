@@ -103,3 +103,19 @@ function buildGrid() {
 }
 
 export const OFFICE_GRID = buildGrid();
+
+/**
+ * Named locations for search. Each has a display name, type (OBSTACLE/BLOCKED), and (col, row)
+ * of a walkable tile to path to (e.g. in front of the place). Pathfinding goes to that tile.
+ */
+export const OFFICE_LOCATIONS = [
+  { id: 'washroom-kitchen', name: 'Washroom / Kitchen', type: 'BLOCKED', col: 4, row: 4 },
+  { id: 'sofa', name: 'Sofa / Seating', type: 'OBSTACLE', col: 2, row: 1 },
+  { id: 'tv', name: 'TV Screen', type: 'OBSTACLE', col: 3, row: 2 },
+  { id: 'coffee', name: 'Coffee Machine', type: 'OBSTACLE', col: 1, row: 1 },
+  { id: 'exit', name: 'Exit Gate', type: 'OBSTACLE', col: 4, row: 0 },
+  { id: 'sunny-table', name: 'Sunny Table', type: 'OBSTACLE', col: 4, row: 5 },
+  { id: 'saneer-table', name: 'Saneer-Ameen-Ibrahim Table', type: 'OBSTACLE', col: 0, row: 5 },
+  { id: 'ruhban', name: 'Ruhban', type: 'OBSTACLE', col: 5, row: 11 },
+  { id: 'meeting-table', name: 'Meeting Table', type: 'OBSTACLE', col: 3, row: 11 },
+];

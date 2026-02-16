@@ -1,97 +1,126 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# Indoor Mapping
 
-# Getting Started
+React Native app for indoor positioning, wayfinding, and navigation on a tile-based office map. Uses a canvas-based 2D map (no GPS at runtime for the floor plan), with optional GPS to set initial position and PDR (accelerometer + gyroscope) for step-based movement.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+---
 
-## Step 1: Start Metro
+## Features
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+- **Tile-based map** — 6×12 grid (18 ft × 36 ft), 3 ft tiles; walkable / obstacle / blocked regions
+- **Wayfinding** — A* pathfinding on the grid; tap or search to set start and destination; route polyline overlay
+- **Search** — Search named locations (e.g. Washroom, Coffee, Exit, Meeting Table) and set destination; path from current position to selected location
+- **PDR (Pedestrian Dead Reckoning)** — Step detection (accelerometer) + heading (gyroscope); blue dot moves with steps in heading direction
+- **GPS** — “Location” button sets blue-dot position from device GPS (snapped to nearest walkable tile) for initial placement
+- **Stylized floor plan** — `DummyFloorMap` background with labeled obstacles/blocked areas; transparent overlay for path and markers
+- **Tap flow** — 1st tap: set start + move blue dot; 2nd tap: set destination and show route; 3rd tap: move “you” again and clear destination
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+---
 
-```sh
-# Using npm
-npm start
+## Tech Stack
 
-# OR using Yarn
-yarn start
+- **React Native** 0.83
+- **react-native-svg** — Map overlay (path, circles, heading arrow)
+- **react-native-sensors** — Accelerometer, gyroscope (step detection + heading)
+- **@react-native-community/geolocation** — GPS for “Location” button
+- **react-native-wifi-reborn** — Available for future WiFi-based anchoring (not used in main flow yet)
+
+---
+
+## Project Structure
+
+```
+src/
+├── components/
+│   ├── OfficeMap.js       # Main screen: map, PDR, search, tap, path
+│   ├── DummyFloorMap.js   # Stylized floor plan (SVG) + location labels
+│   ├── FirstFloorMap.js   # Alternate floor visual
+│   ├── FirstFloorPDR.js   # PDR on first-floor map
+│   └── ...
+├── data/
+│   ├── officeGridData.js  # Grid, tiles, OFFICE_GRID, OFFICE_LOCATIONS, toMap/toGrid, snapToWalkable
+│   ├── mapAnchor.js       # GPS ↔ map pixels (REF_LAT, REF_LON, latLonToMapPixels)
+│   └── wifiAPData.js      # WiFi AP list (for future RSSI/zone use)
+├── utils/
+│   ├── gridPathfinding.js # A* on grid; getGridPathFromTo()
+│   ├── locationService.js # GPS permission, getDeviceLocation, deviceCoordsToMapPixels
+│   ├── wifiPositioning.js # WiFi-based position (optional)
+│   ├── wifiScan.js       # WiFi scan (optional)
+│   └── Document.txt      # Full technical & UX handoff (positioning, route-lock, free-roam, RSSI)
+├── hooks/
+│   └── usePDR.js
+└── services/
+    └── PedestrianDeadReckoning.js
 ```
 
-## Step 2: Build and run your app
+---
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+## Map Model
 
-### Android
+- **Scale:** 18 ft × 36 ft; 30 px/ft → 540×1080 px; tile size 90 px (3 ft).
+- **Tile types:** `WALKABLE` (0), `OBSTACLE` (1), `BLOCKED` (2). Pathfinding and movement use walkable tiles only.
+- **Named locations** (`OFFICE_LOCATIONS`): Washroom/Kitchen (BLOCKED), Sofa, TV, Coffee, Exit, Sunny Table, Saneer-Ameen-Ibrahim Table, Ruhban, Meeting Table (OBSTACLE). Each has a walkable (col, row) to path to.
+
+---
+
+## Positioning (Current Behavior)
+
+- **Start:** Tap a walkable tile or use “Location” (GPS) to set start and blue-dot position.
+- **PDR:** On each detected step, position moves by a fixed step length (2.3 ft) in **phone heading** (gyro) direction, then snapped to walkable. Assumes phone is held facing walking direction.
+- **Limitations:** If the phone points one way but the user walks another (e.g. backward or in pocket), the dot can move in the wrong direction. Route-locked movement (move dot along path, ignore heading) and free-roam candidate headings are described in `src/utils/Document.txt` and are not yet implemented in code.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node ≥ 20
+- React Native environment set up ([Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment))
+- Android Studio / Xcode for running on device or emulator
+
+### Install and run
 
 ```sh
-# Using npm
+# Install dependencies
+npm install
+
+# Start Metro
+npm start
+```
+
+In a second terminal:
+
+```sh
+# Android
 npm run android
 
-# OR using Yarn
-yarn android
-```
-
-### iOS
-
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
-```sh
-bundle install
-```
-
-Then, and every time you update your native dependencies, run:
-
-```sh
-bundle exec pod install
-```
-
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
-
-```sh
-# Using npm
+# iOS (first time or after native dep changes: bundle exec pod install)
 npm run ios
-
-# OR using Yarn
-yarn ios
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+### Reload
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+- **Android:** Double-tap <kbd>R</kbd> or Dev Menu → Reload (<kbd>Ctrl</kbd>+<kbd>M</kbd> / <kbd>Cmd</kbd>+<kbd>M</kbd>).
+- **iOS:** <kbd>R</kbd> in simulator.
 
-## Step 3: Modify your app
+---
 
-Now that you have successfully run the app, let's make changes!
+## Reference: Full Specification
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+`src/utils/Document.txt` is the technical and UX handoff. It covers:
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+- Canvas model, tiles, zones, stable position
+- **Route-locked movement** (move dot along path; ignores phone heading when navigating)
+- **Free-roam** (candidate headings + snap to walkable)
+- **RSSI zone anchoring** (fingerprint match + blend; no trilateration)
+- Formulas (PDR step, snap, EMA, stationary, RSSI confidence)
+- Implementation addendum: gyro heading, step detector, free-roam step code, WiFi zone match, wiring
+- Screens, delivery targeting, dev tools
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+Use it as the single source of truth for implementing route-lock, free-roam, and optional RSSI anchoring.
 
-## Congratulations! :tada:
+---
 
-You've successfully run and modified your React Native App. :partying_face:
+## License
 
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+Private. See repository settings.

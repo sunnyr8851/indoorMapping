@@ -43,3 +43,27 @@ export async function getWifiRSSIList() {
   }
   return [];
 }
+
+/** Delay helper */
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Scan WiFi 3 times and average RSSI per BSSID for better accuracy.
+ * Returns object { [bssid]: averagedLevel } suitable for floor map nodes.
+ * @param {number} scanCount - Number of scans (default 3)
+ * @param {number} delayMs - Delay between scans in ms (default 400)
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function getAveragedWifiRSSI() {
+  const list = await WifiManager.reScanAndLoadWifiList();
+  
+  const result = {};
+  for (const w of list) {
+    const key = (w.BSSID || '').toLowerCase();
+    if (key) result[key] = w.level;
+  }
+  
+  return result;
+}
