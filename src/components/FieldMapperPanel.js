@@ -20,15 +20,19 @@ import {
 } from 'react-native';
 
 import { gyroscope, setUpdateIntervalForType, SensorTypes } from 'react-native-sensors';
-import { getAveragedWifiRSSI } from '../utils/wifiScan';
+import {
+  fetchAllAccessPoints,
+  getAveragedWifiRSSI,
+} from '../utils/wifiScan';
 import { requestLocationPermission, getDeviceLocation } from '../utils/locationService';
 import { saveFieldMapToFile, exportToCodebase } from '../utils/fieldMappingService';
+import DeviceInfoSection from './DeviceInfoSection';
 
 const TILE_SIZE_FT = 3;
 const RSSI_SCAN_COUNT = 3;
 const RSSI_SCAN_DELAY_MS = 400;
 
-export default function FieldMapperPanel({ onTileChange }) {
+export default function FieldMapperPanel({ onTileChange, selectedAPs: externalAPs }) {
 
   const [floor, setFloor] = useState(1);
   const [startX, setStartX] = useState(0);
@@ -41,6 +45,20 @@ export default function FieldMapperPanel({ onTileChange }) {
   const [isRecording, setIsRecording] = useState(false);
   const [savedPath, setSavedPath] = useState(null);
   const [log, setLog] = useState([]);
+
+  // Phase 1: Predefined access points for mapping
+  const [predefinedAPs, setPredefinedAPs] = useState([]);
+  const [fetchedAPs, setFetchedAPs] = useState([]);
+  const [selectedAPs, setSelectedAPs] = useState(new Set()); // Selected AP bssids
+  const [fetchingAPs, setFetchingAPs] = useState(false);
+
+  // Sync with external APs from AP Manager
+  useEffect(() => {
+    if (externalAPs && externalAPs.length > 0) {
+      setPredefinedAPs(externalAPs);
+      console.log(`Received ${externalAPs.length} APs from AP Manager`);
+    }
+  }, [externalAPs]);
 
   const headingRef = useRef(0);
   const gyroSubRef = useRef(null);
@@ -116,6 +134,7 @@ export default function FieldMapperPanel({ onTileChange }) {
         ? { lat: 0, lng: 0 }
         : { lat: loc.lat, lng: loc.lon },
       tileSizeFeet: TILE_SIZE_FT,
+      accessPoints: predefinedAPs.map((ap) => ({ bssid: ap.bssid, ssid: ap.ssid })),
       nodes: [],
     };
 
@@ -128,7 +147,7 @@ export default function FieldMapperPanel({ onTileChange }) {
 
     if (onTileChange) onTileChange(localStartX, localStartY);
 
-  }, [floor, startX, startY]);
+  }, [floor, startX, startY, predefinedAPs]);
 
   /* ---------------- MOVE TILE ---------------- */
 
@@ -154,12 +173,27 @@ export default function FieldMapperPanel({ onTileChange }) {
     addLog("Recording node...");
 
     try {
+      // Scan all APs
+      const averaged = await getAveragedWifiRSSI(RSSI_SCAN_COUNT, RSSI_SCAN_DELAY_MS);
+      
+      // Convert to array format
+      let rssiList = Object.entries(averaged)
+        .map(([bssid, rssi]) => ({ bssid, rssi }))
+        .sort((a, b) => b.rssi - a.rssi);
 
-      const [rssis, loc] = await Promise.all([
-        getAveragedWifiRSSI(RSSI_SCAN_COUNT, RSSI_SCAN_DELAY_MS),
-        getDeviceLocation(),
-      ]);
+      // If predefined APs are selected, filter to only those
+      // Otherwise, store ALL detected APs (no top N restriction)
+      const predefinedBssids = predefinedAPs.map((ap) => ap.bssid.toLowerCase());
+      if (predefinedBssids.length > 0) {
+        rssiList = rssiList.filter(r => 
+          predefinedBssids.includes(r.bssid.toLowerCase())
+        );
+        addLog(`Filtered to ${rssiList.length} predefined APs`);
+      } else {
+        addLog(`Storing all ${rssiList.length} APs`);
+      }
 
+      const loc = await getDeviceLocation();
       const headingDeg = (headingRef.current * 180) / Math.PI;
 
       setMapping(prev => {
@@ -171,7 +205,7 @@ export default function FieldMapperPanel({ onTileChange }) {
           x: currentTileX,
           y: currentTileY,
           heading: headingDeg,
-          rssis,
+          rssis: rssiList,
           neighbors: prevNode ? [prevNode.id] : [],
           geoCoordinate: loc.error ? null : { lat: loc.lat, lng: loc.lon },
         };
@@ -201,19 +235,68 @@ export default function FieldMapperPanel({ onTileChange }) {
       setIsRecording(false);
     }
 
-  }, [mapping, currentTileX, currentTileY, isRecording]);
+  }, [mapping, currentTileX, currentTileY, isRecording, predefinedAPs]);
 
   /* ---------------- EXPORT ---------------- */
 
   const exportPath = useCallback(async () => {
     if (!mapping) return;
-
+    addLog("Export started");
     // const result = await exportToCodebase(mapping);
     const path = await saveFieldMapToFile(mapping);
-setSavedPath(path);
-addLog("Export successful");
-
+    setSavedPath(path);
+    addLog("Export successful");
   }, [mapping]);
+
+  const handleFetchAccessPoints = useCallback(async () => {
+    setFetchingAPs(true);
+    addLog("Requesting permission...");
+
+    const granted = await requestLocationPermission();
+    if (!granted) {
+      addLog("Permission denied");
+      setFetchingAPs(false);
+      return;
+    }
+
+    addLog("Fetching access points...");
+    try {
+      const list = await fetchAllAccessPoints();
+      // Sort by RSSI descending (strongest signal first)
+      const sorted = list.sort((a, b) => b.rssi - a.rssi);
+      setFetchedAPs(sorted);
+      setSelectedAPs(new Set()); // Clear selection
+      addLog(`Found ${sorted.length} AP(s)`);
+    } catch (e) {
+      addLog("Fetch APs failed");
+    } finally {
+      setFetchingAPs(false);
+    }
+  }, []);
+
+  const toggleAPSelection = useCallback((bssid) => {
+    setSelectedAPs(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(bssid)) {
+        newSet.delete(bssid);
+      } else {
+        newSet.add(bssid);
+      }
+      return newSet;
+    });
+  }, []);
+
+  const handleUseAsPredefined = useCallback(() => {
+    if (selectedAPs.size === 0) {
+      addLog("Select at least one AP");
+      return;
+    }
+    const selected = fetchedAPs
+      .filter((ap) => selectedAPs.has(ap.bssid))
+      .map((ap) => ({ bssid: ap.bssid, ssid: ap.ssid }));
+    setPredefinedAPs(selected);
+    addLog(`Set ${selected.length} AP(s) as predefined`);
+  }, [fetchedAPs, selectedAPs]);
 
   useEffect(() => {
     console.log("UPDATED MAPPING:", mapping);
@@ -227,6 +310,62 @@ addLog("Export successful");
 
   return (
     <View style={styles.container}>
+
+      <DeviceInfoSection />
+
+      {/* Phase 1: Access point mapping */}
+      <Text style={styles.sectionTitle}>Access points (Phase 1)</Text>
+      <Text style={styles.hint}>
+        Fetch APs, then set them as predefined. Mapping will store top 3 RSSI per tile.
+      </Text>
+      <TouchableOpacity
+        style={[styles.btn, styles.fetchApBtn]}
+        onPress={handleFetchAccessPoints}
+        disabled={fetchingAPs}
+      >
+        {fetchingAPs ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Text style={styles.btnText}>Fetch access points (RSSI)</Text>
+        )}
+      </TouchableOpacity>
+      {predefinedAPs.length > 0 && (
+        <Text style={styles.predefinedCount}>Predefined APs: {predefinedAPs.length}</Text>
+      )}
+      {fetchedAPs.length > 0 && (
+        <>
+          <Text style={styles.apListTitle}>
+            Scanned ({fetchedAPs.length}) - Selected: {selectedAPs.size}
+          </Text>
+          <Text style={styles.hint}>Tap to select APs for mapping</Text>
+          <ScrollView style={styles.apList} nestedScrollEnabled>
+            {fetchedAPs.map((ap, i) => {
+              const isSelected = selectedAPs.has(ap.bssid);
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={[styles.apRowContainer, isSelected && styles.apRowSelected]}
+                  onPress={() => toggleAPSelection(ap.bssid)}
+                >
+                  <Text style={styles.checkbox}>{isSelected ? '☑' : '☐'}</Text>
+                  <Text style={[styles.apRow, isSelected && styles.apRowTextSelected]}>
+                    {ap.rssi} dBm · {ap.ssid || 'Hidden'} · {ap.bssid}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          <TouchableOpacity
+            style={[styles.btn, styles.usePredefinedBtn, selectedAPs.size === 0 && styles.btnDisabled]}
+            onPress={handleUseAsPredefined}
+            disabled={selectedAPs.size === 0}
+          >
+            <Text style={styles.btnText}>
+              Use selected ({selectedAPs.size}) as predefined APs
+            </Text>
+          </TouchableOpacity>
+        </>
+      )}
 
       <Text style={styles.title}>Field Mapping (3×3 ft)</Text>
 
@@ -333,9 +472,38 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     margin: 8,
-    marginTop:35
   },
   title: { color: '#00ff88', fontWeight: 'bold', marginBottom: 10 },
+  sectionTitle: { color: '#00ff88', fontWeight: '600', marginBottom: 4, fontSize: 14 },
+  hint: { color: '#888', fontSize: 11, marginBottom: 8 },
+  predefinedCount: { color: '#4a69bd', fontSize: 12, marginBottom: 8 },
+  apListTitle: { color: '#aaa', fontSize: 11, marginBottom: 4 },
+  apList: { maxHeight: 180, marginBottom: 8 },
+  apRowContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    marginBottom: 2,
+    borderRadius: 4,
+    backgroundColor: '#1a1a2e',
+  },
+  apRowSelected: {
+    backgroundColor: '#2d4a3e',
+    borderWidth: 1,
+    borderColor: '#00ff88',
+  },
+  checkbox: {
+    color: '#00ff88',
+    fontSize: 16,
+    marginRight: 8,
+    width: 20,
+  },
+  apRow: { color: '#ccc', fontSize: 10, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', flex: 1 },
+  apRowTextSelected: { color: '#fff' },
+  fetchApBtn: { backgroundColor: '#1a4d7a' },
+  usePredefinedBtn: { backgroundColor: '#2d5a87', marginBottom: 12 },
+  btnDisabled: { opacity: 0.5 },
   row: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   label: { color: '#fff', marginRight: 8 },
   input: {

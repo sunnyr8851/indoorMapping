@@ -1,19 +1,19 @@
 /**
  * Field mapping service: save floor map JSON to device storage.
  *
- * Stored JSON format (matches reference from FieldMapper-style logic):
+ * Phase 1 export format (for Phase 2 positioning):
  * {
  *   floor: number,
  *   originHeading: number,
  *   geoCoordinate: { lat, lng },
  *   tileSizeFeet: 3,
+ *   accessPoints: [ { bssid, ssid? } ],   // predefined APs used for mapping
  *   nodes: [
- *     { id, x, y, heading, rssis: { bssid: rssi, ... }, neighbors: [...] }
+ *     { id, x, y, heading, rssis: [ { bssid, rssi }, ... ], neighbors: [...] }
  *   ]
  * }
- * - (x, y) = tiling position; mapping starts at (0, 0). Each step = one 3×3 ft tile.
- * - RSSI per node is averaged from 3 scans for better accuracy.
- * - geoCoordinate = GPS at session start; nodes may optionally include geoCoordinate per record.
+ * - (x, y) = tile/grid position; each node stores top 3 RSSI from predefined APs.
+ * - Phase 2: scan current RSSI from same accessPoints, compare top 3 to find closest tile.
  */
 
 import RNFS from 'react-native-fs';
