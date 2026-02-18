@@ -18,6 +18,7 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import Svg, { Rect, Circle, Text as SvgText } from 'react-native-svg';
 
 import { gyroscope, setUpdateIntervalForType, SensorTypes } from 'react-native-sensors';
 import {
@@ -27,6 +28,7 @@ import {
 import { requestLocationPermission, getDeviceLocation } from '../utils/locationService';
 import { saveFieldMapToFile, exportToCodebase } from '../utils/fieldMappingService';
 import DeviceInfoSection from './DeviceInfoSection';
+import { OFFICE_GRID, OFFICE_LOCATIONS, COLS, ROWS, TILE } from '../data/officeGridData';
 
 const TILE_SIZE_FT = 3;
 const RSSI_SCAN_COUNT = 3;
@@ -399,6 +401,92 @@ export default function FieldMapperPanel({ onTileChange, selectedAPs: externalAP
             Current Tile: ({currentTileX}, {currentTileY})
           </Text>
 
+          {/* Office Map Visualization (mirrored: exit gate on left) */}
+          <View style={styles.mapContainer}>
+            <Svg width={COLS * 30} height={ROWS * 30} viewBox={`0 0 ${COLS * 30} ${ROWS * 30}`}>
+              {/* Grid tiles */}
+              {OFFICE_GRID.map((row, rowIdx) =>
+                row.map((tileType, colIdx) => {
+                  let fill = '#2d4a3e'; // walkable
+                  if (tileType === TILE.OBSTACLE) fill = '#333';
+                  if (tileType === TILE.BLOCKED) fill = '#4a1a1a';
+                  
+                  // Check if this tile has been recorded
+                  const hasNode = mapping.nodes.some(
+                    n => n.x === colIdx && n.y === rowIdx
+                  );
+                  if (hasNode) fill = '#1a4d7a';
+                  
+                  return (
+                    <Rect
+                      key={`${colIdx}-${rowIdx}`}
+                      x={(COLS - 1 - colIdx) * 30}
+                      y={(ROWS - 1 - rowIdx) * 30}
+                      width={29}
+                      height={29}
+                      fill={fill}
+                      stroke="#16213e"
+                      strokeWidth={1}
+                    />
+                  );
+                })
+              )}
+              
+              {/* Location labels */}
+              {OFFICE_LOCATIONS.map((loc, i) => (
+                <SvgText
+                  key={loc.id}
+                  x={(COLS - 1 - loc.col) * 30 + 15}
+                  y={(ROWS - 1 - loc.row) * 30 + 18}
+                  fill="#888"
+                  fontSize={6}
+                  textAnchor="middle"
+                >
+                  {loc.name.slice(0, 8)}
+                </SvgText>
+              ))}
+              
+              {/* Current position indicator */}
+              <Circle
+                cx={(COLS - 1 - currentTileX) * 30 + 15}
+                cy={(ROWS - 1 - currentTileY) * 30 + 15}
+                r={10}
+                fill="#00ff88"
+                opacity={0.9}
+              />
+              <SvgText
+                x={(COLS - 1 - currentTileX) * 30 + 15}
+                y={(ROWS - 1 - currentTileY) * 30 + 18}
+                fill="#000"
+                fontSize={8}
+                fontWeight="bold"
+                textAnchor="middle"
+              >
+                ●
+              </SvgText>
+            </Svg>
+            
+            {/* Legend */}
+            <View style={styles.mapLegend}>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendBox, { backgroundColor: '#2d4a3e' }]} />
+                <Text style={styles.legendText}>Walkable</Text>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendBox, { backgroundColor: '#333' }]} />
+                <Text style={styles.legendText}>Obstacle</Text>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendBox, { backgroundColor: '#4a1a1a' }]} />
+                <Text style={styles.legendText}>Blocked</Text>
+              </View>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendBox, { backgroundColor: '#1a4d7a' }]} />
+                <Text style={styles.legendText}>Recorded</Text>
+              </View>
+            </View>
+          </View>
+
           {/* Direction Grid */}
           <View style={styles.dirGrid}>
 
@@ -540,4 +628,34 @@ const styles = StyleSheet.create({
   count: { color: '#00ff88', marginBottom: 4 },
   pathText: { color: '#aaa', fontSize: 10 },
   logEntry: { color: '#aaa', fontSize: 10 },
+  // Map styles
+  mapContainer: {
+    alignItems: 'center',
+    marginBottom: 16,
+    backgroundColor: '#0d1b2a',
+    borderRadius: 8,
+    padding: 12,
+  },
+  mapLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    marginTop: 10,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 12,
+    marginBottom: 4,
+  },
+  legendBox: {
+    width: 12,
+    height: 12,
+    borderRadius: 2,
+    marginRight: 4,
+  },
+  legendText: {
+    color: '#888',
+    fontSize: 10,
+  },
 });

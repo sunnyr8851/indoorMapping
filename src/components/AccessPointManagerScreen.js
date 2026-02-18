@@ -19,7 +19,9 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
+  Modal,
 } from 'react-native';
+import RNFS from 'react-native-fs';
 
 import {
   fetchAccessPoints,
@@ -28,7 +30,6 @@ import {
   filterMappingJSON,
   loadJSONFile,
   saveFilteredJSON,
-  listMappingFiles,
   exportToCodebase,
 } from '../utils/wifiAccessPointManager';
 import { normalizeBssid } from '../utils/wifiScan';
@@ -47,9 +48,13 @@ export default function AccessPointManagerScreen({ onAPsSelected }) {
   const [manualAPs, setManualAPs] = useState([]);
 
   // JSON filtering
-  const [mappingFiles, setMappingFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
   const [exporting, setExporting] = useState(false);
+
+  // File browser
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [dirContents, setDirContents] = useState([]);
+  const [browsingPath, setBrowsingPath] = useState([]);
 
   // Log
   const [log, setLog] = useState([]);
@@ -163,13 +168,69 @@ export default function AccessPointManagerScreen({ onAPsSelected }) {
     );
   }, [fetchedAPs, selectedBssids, manualAPs, onAPsSelected, addLog]);
 
-  /* ---------------- JSON FILTERING ---------------- */
+  /* ---------------- FILE BROWSER HELPERS ---------------- */
 
-  const handleLoadMappingFiles = useCallback(async () => {
-    const files = await listMappingFiles();
-    setMappingFiles(files);
-    addLog(`Found ${files.length} mapping file(s)`);
+  const listDirectory = useCallback(async (dirPath) => {
+    try {
+      const items = await RNFS.readDir(dirPath);
+      return items
+        .filter((f) => f.isDirectory() || f.name.endsWith('.json'))
+        .map((f) => ({
+          name: f.name,
+          path: f.path,
+          isDirectory: f.isDirectory(),
+          size: f.size || 0,
+        }))
+        .sort((a, b) => {
+          if (a.isDirectory && !b.isDirectory) return -1;
+          if (!a.isDirectory && b.isDirectory) return 1;
+          return a.name.localeCompare(b.name);
+        });
+    } catch (e) {
+      return [];
+    }
+  }, []);
+
+  const handleOpenFileBrowser = useCallback(async () => {
+    setShowFileBrowser(true);
+    
+    // Open directly to Downloads folder
+    const downloadDir = Platform.OS === 'android' 
+      ? RNFS.DownloadDirectoryPath 
+      : RNFS.DocumentDirectoryPath;
+    
+    const contents = await listDirectory(downloadDir);
+    setDirContents(contents);
+    setBrowsingPath([{ name: 'Downloads', path: downloadDir }]);
+    addLog('Opened Downloads folder');
+  }, [listDirectory, addLog]);
+
+  const handleBrowseDirectory = useCallback(async (dirPath, dirName) => {
+    const contents = await listDirectory(dirPath);
+    setDirContents(contents);
+    setBrowsingPath((prev) => [...prev, { name: dirName, path: dirPath }]);
+  }, [listDirectory]);
+
+  const handleBrowseBack = useCallback(() => {
+    if (browsingPath.length <= 1) {
+      setBrowsingPath([]);
+      setDirContents([]);
+      setShowFileBrowser(false);
+    } else {
+      const newPath = browsingPath.slice(0, -1);
+      const parentDir = newPath[newPath.length - 1];
+      setBrowsingPath(newPath);
+      listDirectory(parentDir.path).then(setDirContents);
+    }
+  }, [browsingPath, listDirectory]);
+
+  const handleSelectFile = useCallback((file) => {
+    setSelectedFile(file);
+    setShowFileBrowser(false);
+    addLog(`Selected: ${file.name}`);
   }, [addLog]);
+
+  /* ---------------- JSON FILTERING ---------------- */
 
   const handleFilterAndExport = useCallback(async () => {
     if (!selectedFile) {
@@ -384,7 +445,7 @@ export default function AccessPointManagerScreen({ onAPsSelected }) {
       </View>
 
       {/* Use Selected Button */}
-      <View style={styles.section}>
+      {/* <View style={styles.section}>
         <Text style={styles.sectionTitle}>3. Apply Selection</Text>
         <TouchableOpacity style={[styles.btn, styles.useBtn]} onPress={handleUseSelected}>
           <Text style={styles.btnText}>
@@ -393,27 +454,20 @@ export default function AccessPointManagerScreen({ onAPsSelected }) {
               : `Use Selected (${selectedBssids.size + manualAPs.length})`}
           </Text>
         </TouchableOpacity>
-      </View>
+      </View> */}
 
       {/* JSON Filtering Section */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>4. Filter Existing JSON</Text>
-        <TouchableOpacity style={[styles.btn, styles.loadBtn]} onPress={handleLoadMappingFiles}>
-          <Text style={styles.btnText}>Load Mapping Files</Text>
+        <Text style={styles.sectionTitle}>3. Filter Existing JSON</Text>
+        <TouchableOpacity style={[styles.btn, styles.loadBtn]} onPress={handleOpenFileBrowser}>
+          <Text style={styles.btnText}>Browse Downloads for JSON</Text>
         </TouchableOpacity>
 
-        {mappingFiles.length > 0 && (
-          <ScrollView style={styles.fileList} nestedScrollEnabled>
-            {mappingFiles.map((file, i) => (
-              <TouchableOpacity
-                key={i}
-                style={[styles.fileRow, selectedFile?.path === file.path && styles.fileRowSelected]}
-                onPress={() => setSelectedFile(file)}
-              >
-                <Text style={styles.fileName}>{file.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+        {selectedFile && (
+          <View style={styles.selectedFileInfo}>
+            <Text style={styles.selectedFileLabel}>Selected:</Text>
+            <Text style={styles.selectedFileName}>{selectedFile.name}</Text>
+          </View>
         )}
 
         {selectedFile && (
@@ -440,6 +494,47 @@ export default function AccessPointManagerScreen({ onAPsSelected }) {
           ))}
         </ScrollView>
       </View>
+
+      {/* File Browser Modal */}
+      <Modal visible={showFileBrowser} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select JSON File</Text>
+            <Text style={styles.currentPath} numberOfLines={2}>{browsingPath.map(p => p.name).join(' / ')}</Text>
+            
+            <TouchableOpacity style={styles.backBtn} onPress={handleBrowseBack}>
+              <Text style={styles.backBtnText}>⬆ Parent Folder</Text>
+            </TouchableOpacity>
+            
+            <ScrollView style={styles.fileBrowserList}>
+              {dirContents.map((item, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={styles.fileBrowserItem}
+                  onPress={() => item.isDirectory ? handleBrowseDirectory(item.path, item.name) : handleSelectFile(item)}
+                >
+                  <Text style={styles.fileBrowserIcon}>
+                    {item.isDirectory ? '📁' : '📄'}
+                  </Text>
+                  <Text style={[
+                    styles.fileBrowserName,
+                    !item.isDirectory && !item.name.endsWith('.json') && styles.fileBrowserNameDisabled
+                  ]} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            
+            <TouchableOpacity 
+              style={styles.modalCloseBtn} 
+              onPress={() => setShowFileBrowser(false)}
+            >
+              <Text style={styles.modalCloseBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -670,5 +765,91 @@ const styles = StyleSheet.create({
   logEntry: {
     color: '#aaa',
     fontSize: 10,
+  },
+  selectedFileInfo: {
+    backgroundColor: '#2d4a3e',
+    padding: 10,
+    borderRadius: 4,
+    marginTop: 8,
+  },
+  selectedFileLabel: {
+    color: '#00ff88',
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  selectedFileName: {
+    color: '#fff',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: '#16213e',
+    borderRadius: 12,
+    padding: 16,
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    color: '#00ff88',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  currentPath: {
+    color: '#888',
+    fontSize: 11,
+    marginBottom: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  backBtn: {
+    backgroundColor: '#1a4d7a',
+    padding: 10,
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  backBtnText: {
+    color: '#fff',
+    textAlign: 'center',
+    fontSize: 14,
+  },
+  fileBrowserList: {
+    maxHeight: 300,
+  },
+  fileBrowserItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#1a1a2e',
+    borderRadius: 6,
+    marginBottom: 4,
+  },
+  fileBrowserIcon: {
+    fontSize: 18,
+    marginRight: 10,
+  },
+  fileBrowserName: {
+    color: '#fff',
+    fontSize: 13,
+    flex: 1,
+  },
+  fileBrowserNameDisabled: {
+    color: '#666',
+  },
+  modalCloseBtn: {
+    backgroundColor: '#e74c3c',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 12,
+  },
+  modalCloseBtnText: {
+    color: '#fff',
+    textAlign: 'center',
+    fontWeight: 'bold',
   },
 });
