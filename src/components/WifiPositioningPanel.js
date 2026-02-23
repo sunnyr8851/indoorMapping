@@ -17,18 +17,203 @@ import {
   Platform,
   ActivityIndicator,
   Modal,
+  PermissionsAndroid,
+  Alert,
+  Linking,
 } from 'react-native';
 import Svg, { Rect, Circle, Text as SvgText } from 'react-native-svg';
 import RNFS from 'react-native-fs';
+import { pick, types } from '@react-native-documents/picker';
+
+/**
+ * Request storage permission for Android
+ * Android 11+ (API 30+) requires different handling
+ */
+async function requestStoragePermission() {
+  if (Platform.OS !== 'android') return true;
+  
+  try {
+    // Check Android version
+    const androidVersion = Platform.Version;
+    console.log('Android API Level:', androidVersion);
+    
+    if (androidVersion >= 33) {
+      // Android 13+ - READ_MEDIA_* permissions or use app-specific directories
+      // For JSON files, we don't need special media permissions
+      // Just try to access - will work for app directories and Downloads
+      return true;
+    } else if (androidVersion >= 30) {
+      // Android 11-12 - Check if we have access, if not guide to settings
+      const readPermission = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE
+      );
+      
+      if (!readPermission) {
+        // Try requesting anyway (might work on some devices)
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+          {
+            title: 'Storage Permission',
+            message: 'App needs access to your storage to load JSON mapping files.',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          }
+        );
+        
+        if (result !== PermissionsAndroid.RESULTS.GRANTED) {
+          // Guide user to enable "All Files Access" manually
+          Alert.alert(
+            'Permission Required',
+            'For Android 11+, please enable "All Files Access" for this app:\n\n' +
+            '1. Open Settings\n' +
+            '2. Go to Apps → Indoor Mapping\n' +
+            '3. Tap Permissions → Files and media\n' +
+            '4. Select "Allow management of all files"\n\n' +
+            'Or copy your JSON file to the app\'s Download folder.',
+            [
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+              { text: 'Continue Anyway', style: 'cancel' }
+            ]
+          );
+          // Return true to continue - app directories should still work
+          return true;
+        }
+      }
+      return true;
+    } else {
+      // Android 10 and below - use legacy permissions
+      const granted = await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+        PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+      ]);
+      
+      const readGranted = granted[PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE] === PermissionsAndroid.RESULTS.GRANTED;
+      
+      if (!readGranted) {
+        Alert.alert(
+          'Permission Denied',
+          'Storage permission is required. Please grant it in Settings.',
+          [
+            { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            { text: 'Cancel', style: 'cancel' }
+          ]
+        );
+        return false;
+      }
+      return true;
+    }
+  } catch (err) {
+    console.warn('Permission error:', err);
+    // Continue anyway - app directories should work
+    return true;
+  }
+}
 
 import { getAveragedWifiRSSI } from '../utils/wifiScan';
 import { findClosestTile, findClosestTiles } from '../utils/wifiFingerprintPositioning';
 import { OFFICE_GRID, OFFICE_LOCATIONS, COLS, ROWS, TILE } from '../data/officeGridData';
 
 // Constants
-const SCAN_INTERVAL_MS = 3000;
-const SCAN_COUNT = 2;
-const SCAN_DELAY_MS = 300;
+const SCAN_INTERVAL_MS = 4000;  // Interval between position updates
+const SCAN_COUNT = 5;           // Number of WiFi scans to average (more = stable)
+const SCAN_DELAY_MS = 800;      // Delay between scans (~4 sec total for stability)
+
+/**
+ * Check if a tile position is walkable (not an obstacle or blocked)
+ * @param {number} x - X coordinate (will be rounded)
+ * @param {number} y - Y coordinate (will be rounded)
+ * @returns {boolean} - true if walkable
+ */
+function isTileWalkable(x, y) {
+  const tileX = Math.round(x);
+  const tileY = Math.round(y);
+  
+  // Check bounds
+  if (tileY < 0 || tileY >= ROWS || tileX < 0 || tileX >= COLS) {
+    return false;
+  }
+  
+  // OFFICE_GRID[row][col] - row is Y, col is X
+  const tileType = OFFICE_GRID[tileY]?.[tileX];
+  
+  // TILE.WALKABLE = 0, TILE.OBSTACLE = 1, TILE.BLOCKED = 2
+  return tileType === TILE.WALKABLE;
+}
+
+/**
+ * Find nearest walkable position for fractional coordinates
+ * Returns valid position or snaps to closest walkable tile from candidates
+ * @param {number} x - Fractional X
+ * @param {number} y - Fractional Y
+ * @param {Array} topTiles - Fallback tiles (all mapped = all walkable)
+ * @returns {{ x: number, y: number, wasAdjusted: boolean }}
+ */
+function getValidPosition(x, y, topTiles = []) {
+  // Check if rounded position is walkable
+  if (isTileWalkable(x, y)) {
+    return { x, y, wasAdjusted: false };
+  }
+  
+  // Position falls on obstacle - find nearest walkable from top tiles
+  // Top tiles are from mapping data, so they're always walkable
+  if (topTiles.length > 0) {
+    // Return closest tile position (fractional but centered on valid tile)
+    const closest = topTiles[0];
+    return { 
+      x: closest.x, 
+      y: closest.y, 
+      wasAdjusted: true 
+    };
+  }
+  
+  // Last resort: just round and hope
+  return { x: Math.round(x), y: Math.round(y), wasAdjusted: true };
+}
+
+/**
+ * Handle shared file from intent (e.g., from WhatsApp share)
+ * Copies the file to app directory and returns the local path
+ */
+async function handleSharedFile(uri) {
+  if (!uri) return null;
+  
+  try {
+    console.log('Received shared file:', uri);
+    
+    // Generate a unique filename
+    const timestamp = Date.now();
+    const destPath = `${RNFS.DocumentDirectoryPath}/shared_mapping_${timestamp}.json`;
+    
+    // If it's a content:// URI, we need to copy it
+    if (uri.startsWith('content://')) {
+      // Read the content from the URI
+      const content = await RNFS.readFile(uri, 'utf8');
+      
+      // Validate it's JSON
+      try {
+        JSON.parse(content);
+      } catch (e) {
+        console.log('Shared file is not valid JSON');
+        return null;
+      }
+      
+      // Save to app directory
+      await RNFS.writeFile(destPath, content, 'utf8');
+      console.log('Shared file saved to:', destPath);
+      
+      return {
+        path: destPath,
+        name: `shared_mapping_${timestamp}.json`,
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error handling shared file:', error);
+    return null;
+  }
+}
 
 export default function WifiPositioningPanel() {
   // Mapping data loaded from filtered JSON
@@ -63,19 +248,84 @@ export default function WifiPositioningPanel() {
     setLog([...logRef.current]);
   }, []);
 
+  // Handle shared file when app opens via share intent
+  const processSharedFile = useCallback(async (url) => {
+    if (!url) return;
+    
+    addLog('Received shared file...');
+    const fileInfo = await handleSharedFile(url);
+    
+    if (fileInfo) {
+      addLog(`Saved: ${fileInfo.name}`);
+      
+      // Auto-load the shared file
+      try {
+        const content = await RNFS.readFile(fileInfo.path, 'utf8');
+        const data = JSON.parse(content);
+        setMappingData(data);
+        setSelectedFile(fileInfo);
+        addLog(`Loaded: ${data.nodes?.length || 0} nodes, ${data.accessPoints?.length || 0} APs`);
+        
+        Alert.alert(
+          'File Loaded!',
+          `Successfully loaded mapping data from shared file.\n\n` +
+          `Nodes: ${data.nodes?.length || 0}\n` +
+          `Access Points: ${data.accessPoints?.length || 0}`,
+          [{ text: 'OK' }]
+        );
+      } catch (e) {
+        addLog(`Error loading shared file: ${e.message}`);
+      }
+    } else {
+      addLog('Could not process shared file');
+    }
+  }, [addLog]);
+
+  // Check for shared file on mount
+  useEffect(() => {
+    // Check initial URL (app opened via share)
+    Linking.getInitialURL().then((url) => {
+      if (url) {
+        processSharedFile(url);
+      }
+    });
+
+    // Listen for incoming shares while app is running
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      processSharedFile(url);
+    });
+
+    return () => {
+      subscription?.remove();
+    };
+  }, [processSharedFile]);
+
   /* ---------------- FILE BROWSER HELPERS ---------------- */
 
   const getStorageDirectories = useCallback(() => {
     if (Platform.OS === 'android') {
+      // App directories first (always accessible without permission)
+      // Then system directories (may need permission on Android 11+)
       return [
-        { name: 'Downloads', path: RNFS.DownloadDirectoryPath },
-        { name: 'Documents', path: RNFS.DocumentDirectoryPath },
-        { name: 'External Storage', path: RNFS.ExternalStorageDirectoryPath },
+        // App-specific directories (ALWAYS work, no permission needed)
+        { name: '📱 App Files', path: RNFS.DocumentDirectoryPath, appDir: true },
+        { name: '📱 App External', path: RNFS.ExternalDirectoryPath, appDir: true },
+        { name: '📱 App Cache', path: RNFS.CachesDirectoryPath, appDir: true },
+        // System directories (may need permission)
+        { name: '📥 Downloads', path: RNFS.DownloadDirectoryPath },
+        { name: '📥 Internal Download', path: '/storage/emulated/0/Download' },
+        { name: '📄 Documents', path: '/storage/emulated/0/Documents' },
+        { name: '💾 External Storage', path: RNFS.ExternalStorageDirectoryPath },
+        // WhatsApp directories (Android 10 and below)
+        { name: '💬 WhatsApp Documents', path: '/storage/emulated/0/WhatsApp/Media/WhatsApp Documents' },
+        // WhatsApp directories (Android 11+)
+        { name: '💬 WhatsApp (New)', path: '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents' },
       ];
     }
     return [
       { name: 'Documents', path: RNFS.DocumentDirectoryPath },
       { name: 'Library', path: RNFS.LibraryDirectoryPath },
+      { name: 'Cache', path: RNFS.CachesDirectoryPath },
     ];
   }, []);
 
@@ -83,19 +333,28 @@ export default function WifiPositioningPanel() {
     try {
       const items = await RNFS.readDir(dirPath);
       return items
-        .filter((f) => f.isDirectory() || f.name.endsWith('.json'))
+        // Show all files, not just .json (highlight JSON files differently in UI)
+        .filter((f) => f.isDirectory() || 
+          f.name.endsWith('.json') || 
+          f.name.endsWith('.JSON') ||
+          f.name.endsWith('.txt'))  // Also show .txt files (might be renamed JSON)
         .map((f) => ({
           name: f.name,
           path: f.path,
           isDirectory: f.isDirectory(),
           size: f.size || 0,
+          isJson: f.name.toLowerCase().endsWith('.json'),
         }))
         .sort((a, b) => {
+          // Directories first, then JSON files, then others
           if (a.isDirectory && !b.isDirectory) return -1;
           if (!a.isDirectory && b.isDirectory) return 1;
+          if (a.isJson && !b.isJson) return -1;
+          if (!a.isJson && b.isJson) return 1;
           return a.name.localeCompare(b.name);
         });
     } catch (e) {
+      console.log(`Cannot access directory: ${dirPath}`, e.message);
       return [];
     }
   }, []);
@@ -125,23 +384,116 @@ export default function WifiPositioningPanel() {
 
   /* ---------------- FILE BROWSER ---------------- */
 
+  // Show instructions for copying files to app directory
+  const showCopyInstructions = useCallback(() => {
+    Alert.alert(
+      'How to Load WhatsApp File',
+      `📱 For WhatsApp files on Android 11+:\n\n` +
+      `EASIEST METHOD:\n` +
+      `1. Open WhatsApp\n` +
+      `2. Long-press on the JSON file\n` +
+      `3. Tap "Share" or ⋮ menu → Share\n` +
+      `4. Choose "Files" or "My Files" app\n` +
+      `5. Save to "Downloads" folder\n` +
+      `6. Come back here and browse Downloads\n\n` +
+      `OR use File Manager:\n` +
+      `1. Open your file manager app\n` +
+      `2. Find the file in WhatsApp folder\n` +
+      `3. Copy/Move it to Downloads\n` +
+      `4. Browse Downloads here\n\n` +
+      `WhatsApp path:\n` +
+      `Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents/`,
+      [{ text: 'OK' }]
+    );
+  }, []);
+
+  /**
+   * Open SYSTEM file picker - can access ANY location (WhatsApp, Downloads, etc.)
+   * This is the recommended way to pick files!
+   */
+  const handleSystemFilePicker = useCallback(async () => {
+    try {
+      addLog('Opening system file picker...');
+      
+      // Use the new @react-native-documents/picker API
+      const [result] = await pick({
+        mode: 'open',
+        type: [types.json, types.plainText],
+      });
+      
+      console.log('Selected file:', result);
+      addLog(`Selected: ${result.name || 'file'}`);
+      
+      // Read the file content using the URI
+      setLoadingData(true);
+      const content = await RNFS.readFile(result.uri, 'utf8');
+      const data = JSON.parse(content);
+      
+      setMappingData(data);
+      setSelectedFile({ name: result.name || 'mapping.json', path: result.uri });
+      setCurrentPosition(null);
+      setTopMatches([]);
+      
+      addLog(`✅ Loaded: ${data.nodes?.length || 0} nodes, ${data.accessPoints?.length || 0} APs`);
+      
+      Alert.alert(
+        'File Loaded Successfully!',
+        `File: ${result.name || 'mapping.json'}\n` +
+        `Nodes: ${data.nodes?.length || 0}\n` +
+        `Access Points: ${data.accessPoints?.length || 0}`,
+        [{ text: 'OK' }]
+      );
+      
+    } catch (err) {
+      // Check if user cancelled
+      if (err?.message?.includes('cancel') || err?.code === 'DOCUMENT_PICKER_CANCELED') {
+        addLog('File selection cancelled');
+      } else {
+        console.error('File picker error:', err);
+        addLog(`Error: ${err.message}`);
+        Alert.alert('Error', `Could not load file: ${err.message}`);
+      }
+    } finally {
+      setLoadingData(false);
+    }
+  }, [addLog]);
+
+  // Keep the old browser as backup option
   const handleOpenFileBrowser = useCallback(async () => {
+    // Request storage permission first (Android)
+    await requestStoragePermission();
+    
     setShowFileBrowser(true);
     
-    // Open directly to Downloads folder
-    const downloadDir = Platform.OS === 'android' 
+    // Try Downloads first, fall back to app directory if empty/inaccessible
+    let startDir = Platform.OS === 'android' 
       ? RNFS.DownloadDirectoryPath 
       : RNFS.DocumentDirectoryPath;
+    let startName = 'Downloads';
     
-    const contents = await listDirectory(downloadDir);
+    let contents = await listDirectory(startDir);
+    
+    // If Downloads is empty or inaccessible, try app's directory
+    if (contents.length === 0 && Platform.OS === 'android') {
+      startDir = RNFS.DocumentDirectoryPath;
+      startName = '📱 App Files';
+      contents = await listDirectory(startDir);
+      addLog('Downloads empty - showing App Files folder');
+      
+      // Show hint about copying files
+      if (contents.length === 0) {
+        showCopyInstructions();
+      }
+    }
+    
     setDirContents(contents);
-    setCurrentDir(downloadDir);
-    setBrowsingPath([{ name: 'Downloads', path: downloadDir }]);
+    setCurrentDir(startDir);
+    setBrowsingPath([{ name: startName, path: startDir }]);
     
     const files = await listAllJSONFiles();
     setAvailableFiles(files);
-    addLog(`Opened Downloads folder`);
-  }, [listAllJSONFiles, listDirectory, addLog]);
+    addLog(`Opened ${startName} (${contents.length} items)`);
+  }, [listAllJSONFiles, listDirectory, addLog, showCopyInstructions]);
 
   const handleBrowseDirectory = useCallback(async (dirPath, dirName) => {
     const contents = await listDirectory(dirPath);
@@ -208,13 +560,19 @@ export default function WifiPositioningPanel() {
 
       addLog(`Scanned ${Object.keys(currentRssi).length} APs`);
 
-      // Find closest tile
-      const result = findClosestTile(currentRssi, mappingData, { topN: 3 });
+      // Find closest tile using weighted centroid
+      const result = findClosestTile(currentRssi, mappingData, { topN: 3, topK: 3 });
 
-      if (result) {
-        setCurrentPosition({ x: result.x, y: result.y });
-        setMatchDistance(result.distance.toFixed(2));
-        addLog(`Position: (${result.x}, ${result.y}) | Distance: ${result.distance.toFixed(2)}`);
+      if (result && typeof result.x === 'number' && typeof result.y === 'number' && !isNaN(result.x) && !isNaN(result.y)) {
+        // Use FRACTIONAL position for smooth movement
+        // But validate it's not on an obstacle
+        const validPos = getValidPosition(result.x, result.y, result.topTiles || []);
+        
+        setCurrentPosition({ x: validPos.x, y: validPos.y });
+        setMatchDistance(result.closestDistance?.toFixed(2) || result.distance?.toFixed(2) || 'N/A');
+        
+        const adjustedMsg = validPos.wasAdjusted ? ' [adjusted - was on obstacle]' : '';
+        addLog(`Position: (${validPos.x.toFixed(2)}, ${validPos.y.toFixed(2)})${adjustedMsg} | Dist: ${result.closestDistance?.toFixed(2) || 'N/A'}`);
 
         // Get top 3 matches for debugging
         const topResults = findClosestTiles(currentRssi, mappingData, 3);
@@ -377,22 +735,31 @@ export default function WifiPositioningPanel() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>WiFi Positioning (Phase 2)</Text>
+      <Text style={styles.title}>WiFi Positioning (Real-time navigation)</Text>
       <Text style={styles.hint}>
         Load filtered JSON from AP Manager, then scan to detect your position on the office map
       </Text>
 
-      {/* Load Mapping Data Button */}
+      {/* PRIMARY: System File Picker - Works with WhatsApp, Downloads, etc. */}
       <TouchableOpacity
-        style={[styles.btn, styles.loadBtn]}
-        onPress={handleOpenFileBrowser}
+        style={[styles.btn, styles.loadBtn, { backgroundColor: '#4CAF50' }]}
+        onPress={handleSystemFilePicker}
         disabled={loadingData}
       >
         {loadingData ? (
           <ActivityIndicator color="#fff" />
         ) : (
-          <Text style={styles.btnText}>Browse & Load JSON File</Text>
+          <Text style={styles.btnText}>📂 Pick JSON File</Text>
         )}
+      </TouchableOpacity>
+      
+      {/* Alternative: Custom file browser */}
+      <TouchableOpacity
+        style={[styles.btn, { backgroundColor: '#666', marginTop: 8 }]}
+        onPress={handleOpenFileBrowser}
+        disabled={loadingData}
+      >
+        <Text style={[styles.btnText, { fontSize: 12 }]}>Browse App Folders (Backup)</Text>
       </TouchableOpacity>
 
       {/* Selected File Info */}
@@ -501,12 +868,33 @@ export default function WifiPositioningPanel() {
               </TouchableOpacity>
             </View>
 
-            {/* Back button */}
-            {currentDir && (
-              <TouchableOpacity style={styles.backBtn} onPress={handleBrowseBack}>
-                <Text style={styles.backBtnText}>← Back</Text>
+            {/* Action buttons row */}
+            <View style={styles.browserActionRow}>
+              {/* Back button */}
+              {currentDir && (
+                <TouchableOpacity style={styles.backBtn} onPress={handleBrowseBack}>
+                  <Text style={styles.backBtnText}>← Back</Text>
+                </TouchableOpacity>
+              )}
+              
+              {/* Quick access to App Files (always works) */}
+              {currentDir && !currentDir.includes('files') && Platform.OS === 'android' && (
+                <TouchableOpacity 
+                  style={[styles.backBtn, { marginLeft: 8, backgroundColor: '#4CAF50' }]} 
+                  onPress={() => handleBrowseDirectory(RNFS.DocumentDirectoryPath, '📱 App Files')}
+                >
+                  <Text style={styles.backBtnText}>📱 App Files</Text>
+                </TouchableOpacity>
+              )}
+              
+              {/* Help button */}
+              <TouchableOpacity 
+                style={[styles.backBtn, { marginLeft: 'auto', backgroundColor: '#FF9800' }]} 
+                onPress={showCopyInstructions}
+              >
+                <Text style={styles.backBtnText}>❓ Help</Text>
               </TouchableOpacity>
-            )}
+            </View>
 
             {/* Path indicator */}
             {browsingPath.length > 0 && (
@@ -812,12 +1200,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
-  backBtn: {
-    padding: 8,
+  browserActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 8,
   },
+  backBtn: {
+    padding: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#333',
+    borderRadius: 4,
+  },
   backBtnText: {
-    color: '#4a69bd',
+    color: '#fff',
     fontSize: 14,
   },
   currentPath: {
