@@ -111,7 +111,12 @@ async function requestStoragePermission() {
 }
 
 import { getAveragedWifiRSSI } from '../utils/wifiScan';
-import { findClosestTile, findClosestTiles } from '../utils/wifiFingerprintPositioning';
+import { 
+  findClosestTiles, 
+  findPositionWithKalman,
+  resetKalmanFilter,
+  setKalmanEnabled,
+} from '../utils/wifiFingerprintPositioning';
 import { OFFICE_GRID, OFFICE_LOCATIONS, COLS, ROWS, TILE } from '../data/officeGridData';
 
 // Constants
@@ -237,6 +242,9 @@ export default function WifiPositioningPanel() {
   const [isScanning, setIsScanning] = useState(false);
   const [isTracking, setIsTracking] = useState(false);
   const trackingRef = useRef(null);
+
+  // Kalman filter state
+  const [useKalman, setUseKalman] = useState(true);
 
   // Log
   const [log, setLog] = useState([]);
@@ -546,7 +554,7 @@ export default function WifiPositioningPanel() {
     }
 
     setIsScanning(true);
-    addLog('Scanning WiFi...');
+    addLog(`Scanning WiFi...${useKalman ? ' [Kalman ON]' : ''}`);
 
     try {
       // Scan current WiFi RSSI
@@ -560,8 +568,12 @@ export default function WifiPositioningPanel() {
 
       addLog(`Scanned ${Object.keys(currentRssi).length} APs`);
 
-      // Find closest tile using weighted centroid
-      const result = findClosestTile(currentRssi, mappingData, { topN: 3, topK: 3 });
+      // Find position using weighted centroid + optional Kalman filter
+      const result = findPositionWithKalman(currentRssi, mappingData, { 
+        topN: 3, 
+        topK: 3,
+        useKalman: useKalman,
+      });
 
       if (result && typeof result.x === 'number' && typeof result.y === 'number' && !isNaN(result.x) && !isNaN(result.y)) {
         // Use FRACTIONAL position for smooth movement
@@ -571,8 +583,16 @@ export default function WifiPositioningPanel() {
         setCurrentPosition({ x: validPos.x, y: validPos.y });
         setMatchDistance(result.closestDistance?.toFixed(2) || result.distance?.toFixed(2) || 'N/A');
         
-        const adjustedMsg = validPos.wasAdjusted ? ' [adjusted - was on obstacle]' : '';
-        addLog(`Position: (${validPos.x.toFixed(2)}, ${validPos.y.toFixed(2)})${adjustedMsg} | Dist: ${result.closestDistance?.toFixed(2) || 'N/A'}`);
+        // Build log message with Kalman info
+        let logMsg = `Position: (${validPos.x.toFixed(2)}, ${validPos.y.toFixed(2)})`;
+        if (validPos.wasAdjusted) logMsg += ' [adjusted]';
+        if (result.kalmanApplied) {
+          const vel = result.velocity;
+          const speed = Math.sqrt(vel.vx * vel.vx + vel.vy * vel.vy);
+          logMsg += ` | Kalman: gain=${result.kalmanGain?.toFixed(2)}, vel=${speed.toFixed(2)}`;
+        }
+        logMsg += ` | Dist: ${result.closestDistance?.toFixed(2) || 'N/A'}`;
+        addLog(logMsg);
 
         // Get top 3 matches for debugging
         const topResults = findClosestTiles(currentRssi, mappingData, 3);
@@ -585,7 +605,7 @@ export default function WifiPositioningPanel() {
     } finally {
       setIsScanning(false);
     }
-  }, [mappingData, addLog]);
+  }, [mappingData, addLog, useKalman]);
 
   /* ---------------- CONTINUOUS TRACKING ---------------- */
 
@@ -595,8 +615,12 @@ export default function WifiPositioningPanel() {
       return;
     }
 
+    // Reset Kalman filter for fresh tracking session
+    resetKalmanFilter();
+    setKalmanEnabled(useKalman);
+    
     setIsTracking(true);
-    addLog('Started tracking');
+    addLog(`Started tracking${useKalman ? ' with Kalman filter' : ''}`);
 
     // Initial scan
     scanAndPosition();
@@ -605,7 +629,7 @@ export default function WifiPositioningPanel() {
     trackingRef.current = setInterval(() => {
       scanAndPosition();
     }, SCAN_INTERVAL_MS);
-  }, [mappingData, scanAndPosition, addLog]);
+  }, [mappingData, scanAndPosition, addLog, useKalman]);
 
   const stopTracking = useCallback(() => {
     if (trackingRef.current) {
@@ -807,6 +831,29 @@ export default function WifiPositioningPanel() {
           ))}
         </View>
       )}
+
+      {/* Kalman Filter Toggle */}
+      <View style={styles.kalmanRow}>
+        <Text style={styles.kalmanLabel}>Kalman Filter:</Text>
+        <TouchableOpacity
+          style={[
+            styles.kalmanToggle,
+            useKalman ? styles.kalmanOn : styles.kalmanOff,
+          ]}
+          onPress={() => {
+            setUseKalman(!useKalman);
+            setKalmanEnabled(!useKalman);
+          }}
+          disabled={isTracking}
+        >
+          <Text style={styles.kalmanToggleText}>
+            {useKalman ? 'ON' : 'OFF'}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.kalmanHint}>
+          {useKalman ? 'Smooth tracking' : 'Raw positions'}
+        </Text>
+      </View>
 
       {/* Scan Buttons */}
       <View style={styles.buttonRow}>
@@ -1144,6 +1191,42 @@ const styles = StyleSheet.create({
     color: '#ccc',
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // Kalman filter toggle styles
+  kalmanRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#16213e',
+    borderRadius: 6,
+    padding: 8,
+    marginBottom: 10,
+  },
+  kalmanLabel: {
+    color: '#888',
+    fontSize: 12,
+    marginRight: 8,
+  },
+  kalmanToggle: {
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    marginRight: 10,
+  },
+  kalmanOn: {
+    backgroundColor: '#00cc66',
+  },
+  kalmanOff: {
+    backgroundColor: '#555',
+  },
+  kalmanToggleText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  kalmanHint: {
+    color: '#666',
+    fontSize: 10,
+    fontStyle: 'italic',
   },
   buttonRow: {
     flexDirection: 'row',

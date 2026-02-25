@@ -7,9 +7,11 @@
  * - Compare top 3 strongest RSSI with saved data
  * - Find closest matching tile/grid location
  * - Position stabilization to prevent fluctuation
+ * - Kalman filter for smooth temporal tracking
  */
 
 import { normalizeBssid, getAveragedWifiRSSI } from './wifiScan';
+import { getKalmanFilter, resetKalmanFilter as resetKalman, getKalmanStats } from './KalmanPositionFilter';
 
 // ============================================
 // POSITION STABILIZER - Prevents Fluctuation
@@ -509,4 +511,147 @@ export function findClosestTiles(currentRssi, mappingData, topN = 5) {
     .filter(r => r.distance < Infinity)
     .sort((a, b) => a.distance - b.distance)
     .slice(0, topN);
+}
+
+// ============================================
+// KALMAN FILTER INTEGRATION
+// ============================================
+
+// Configure Kalman for WiFi positioning (~4 second scan intervals)
+const KALMAN_CONFIG = {
+  processNoise: 0.3,      // How much position changes between scans
+  measurementNoise: 2.0,  // WiFi RSSI noise level
+  dt: 4.0,                // ~4 seconds between position updates
+};
+
+let kalmanEnabled = false;
+let lastScanTime = null;
+
+/**
+ * Enable or disable Kalman filter
+ * @param {boolean} enabled
+ */
+export function setKalmanEnabled(enabled) {
+  kalmanEnabled = enabled;
+  console.log(`[Kalman] ${enabled ? 'Enabled' : 'Disabled'}`);
+}
+
+/**
+ * Check if Kalman filter is enabled
+ * @returns {boolean}
+ */
+export function isKalmanEnabled() {
+  return kalmanEnabled;
+}
+
+/**
+ * Reset Kalman filter state (call when starting new tracking session)
+ */
+export function resetKalmanFilter() {
+  resetKalman();
+  lastScanTime = null;
+  console.log('[Kalman] Filter reset');
+}
+
+/**
+ * Get Kalman filter statistics for debugging
+ * @returns {Object|null}
+ */
+export { getKalmanStats };
+
+/**
+ * Apply Kalman filter to weighted centroid result.
+ * Calculates RSSI confidence from distance and uses real dt.
+ * 
+ * @param {Object} centroidResult - Result from findClosestTile
+ * @returns {Object} - Kalman-filtered position with metadata
+ */
+export function applyKalmanFilter(centroidResult) {
+  if (!centroidResult) return null;
+  
+  const kalman = getKalmanFilter(KALMAN_CONFIG);
+  
+  // Calculate real dt from time between scans
+  const now = Date.now();
+  if (lastScanTime !== null) {
+    const realDt = (now - lastScanTime) / 1000; // Convert to seconds
+    if (realDt > 0.5 && realDt < 30) {
+      // Only use realistic dt values (0.5s - 30s)
+      kalman.setTimeStep(realDt);
+    }
+  }
+  lastScanTime = now;
+  
+  // Calculate RSSI confidence (0-1) from distance
+  // Distance 0-3 → high confidence (0.8-1.0)
+  // Distance 3-8 → medium confidence (0.5-0.8)
+  // Distance 8-15 → low confidence (0.3-0.5)
+  const rssiDistance = centroidResult.closestDistance || centroidResult.distance || 5;
+  const rssiConfidence = Math.max(0.3, Math.min(1.0, 1 - (rssiDistance / 15)));
+  
+  // Apply Kalman filter to weighted centroid position
+  const kalmanResult = kalman.update(centroidResult.x, centroidResult.y, rssiConfidence);
+  
+  return {
+    // Kalman-filtered position (fractional)
+    x: kalmanResult.rawX,
+    y: kalmanResult.rawY,
+    
+    // Rounded to nearest tile
+    tileX: kalmanResult.x,
+    tileY: kalmanResult.y,
+    
+    // Original weighted centroid position
+    centroidX: centroidResult.x,
+    centroidY: centroidResult.y,
+    
+    // Distance/confidence metrics
+    distance: centroidResult.distance,
+    closestDistance: centroidResult.closestDistance,
+    rssiConfidence: rssiConfidence,
+    
+    // Kalman filter metadata
+    kalmanApplied: true,
+    kalmanGain: (kalmanResult.kalmanGainX + kalmanResult.kalmanGainY) / 2,
+    kalmanConfidence: kalmanResult.confidence,
+    velocity: {
+      vx: kalmanResult.velocityX,
+      vy: kalmanResult.velocityY,
+    },
+    
+    // Original data for reference
+    topTiles: centroidResult.topTiles,
+    weights: centroidResult.weights,
+    closestNode: centroidResult.closestNode,
+  };
+}
+
+/**
+ * Find position with optional Kalman filtering.
+ * Combines weighted centroid + Kalman for smooth tracking.
+ * 
+ * @param {Object} currentRssi - Current WiFi scan { bssid: rssi }
+ * @param {Object} mappingData - Loaded Phase 1 mapping data
+ * @param {Object} options - Configuration options
+ * @param {boolean} options.useKalman - Apply Kalman filter (default: use global setting)
+ * @returns {Object|null} - Position result with Kalman metadata if applied
+ */
+export function findPositionWithKalman(currentRssi, mappingData, options = {}) {
+  const { useKalman = kalmanEnabled, topN = 3, topK = 3 } = options;
+  
+  // Step 1: Weighted centroid positioning
+  const centroidResult = findClosestTile(currentRssi, mappingData, { topN, topK });
+  
+  if (!centroidResult) return null;
+  
+  // Step 2: Apply Kalman if enabled
+  if (useKalman) {
+    return applyKalmanFilter(centroidResult);
+  }
+  
+  // Return centroid result without Kalman
+  return {
+    ...centroidResult,
+    kalmanApplied: false,
+  };
 }

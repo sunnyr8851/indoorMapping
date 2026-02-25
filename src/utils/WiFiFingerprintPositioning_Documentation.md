@@ -444,14 +444,23 @@ resetPositionStabilizer();
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  LAYER 3: Obstacle Validation (Implemented ✅)              │
+│  LAYER 3: Kalman Filter (Implemented ✅) [Optional]         │
+│  - State: [x, y, vx, vy] (position + velocity)              │
+│  - Predict → Update cycle with real dt                      │
+│  - RSSI confidence weighting                                │
+│  - Toggle ON/OFF in UI                                      │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  LAYER 4: Obstacle Validation (Implemented ✅)              │
 │  - Check if position falls on walkable tile                 │
 │  - If on obstacle → snap to closest mapped tile             │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  LAYER 4: Fractional Display (Implemented ✅)               │
+│  LAYER 5: Fractional Display (Implemented ✅)               │
 │  - Blue dot uses fractional position (5.3, 4.8)             │
 │  - Smooth movement between tiles                            │
 └─────────────────────────────────────────────────────────────┘
@@ -570,35 +579,212 @@ Position: (6.12, 5.01) [adjusted - was on obstacle] | Dist: 2.31
 
 ---
 
-## Future: Kalman Filter (Not Yet Implemented)
+## Kalman Filter (Implemented ✅)
 
-### Planned Improvements
+The Kalman filter provides temporal smoothing by combining WiFi measurements with a motion model.
 
-Based on Doc.md specifications, future Kalman implementation will include:
+### State Vector
 
-| Feature | Current | Planned |
-|---------|---------|---------|
-| Time step | N/A | Real `dt = (t_k - t_{k-1}) / 1000` |
-| Units | Tiles | Meters (more accurate) |
-| Gating | None | Reject if Δ > 4 meters |
-| Q matrix | N/A | dt-scaled: `Q(dt)` |
-| State | N/A | `[x, y, vx, vy]` |
+```
+State = [x, y, vx, vy]
 
-### Why Kalman Will Help
+x, y   = Position (in grid tiles)
+vx, vy = Velocity (tiles per second)
+```
 
-| Issue | Current Behavior | With Kalman |
-|-------|------------------|-------------|
-| Standing still | Small oscillations | Velocity → 0, stable |
-| Walking | Follows measurements | Predicts ahead, smoother |
-| Bad scan | Immediate effect | Gated/rejected |
-| Varying scan rate | N/A | dt-adaptive |
+### Algorithm Flow
 
-### When to Add Kalman
+```
+┌────────────────┐     ┌────────────────┐     ┌────────────────┐
+│ Weighted       │ --> │ Kalman         │ --> │ Smoothed       │
+│ Centroid (x,y) │     │ Predict/Update │     │ Position       │
+└────────────────┘     └────────────────┘     └────────────────┘
+                              │
+                    Uses real dt between scans
+                    RSSI confidence weighting
+```
 
-Add Kalman filter when:
-- Current stabilization is insufficient
-- Need predictive positioning
-- Have consistent ~4s scan intervals
+### Key Features
+
+| Feature | Implementation |
+|---------|----------------|
+| Time step | Real `dt = (now - lastScan) / 1000` seconds |
+| State | `[x, y, vx, vy]` - position + velocity |
+| Velocity decay | `v *= 0.9` per step (friction) |
+| Confidence | RSSI distance → confidence (0.3-1.0) |
+| Process noise | 0.3 (tunable) |
+| Measurement noise | 2.0 (tunable) |
+
+### RSSI Confidence Calculation
+
+```javascript
+// Distance 0-3 → high confidence (0.8-1.0)
+// Distance 3-8 → medium confidence (0.5-0.8)
+// Distance 8-15 → low confidence (0.3-0.5)
+rssiConfidence = max(0.3, min(1.0, 1 - (rssiDistance / 15)))
+```
+
+### Usage
+
+Toggle Kalman filter ON/OFF in the UI. When enabled:
+- Filter is reset at tracking start
+- Real time delta (dt) is calculated between scans
+- Position is predicted, then corrected with measurement
+- Velocity is tracked for motion smoothing
+
+### Behavior Comparison
+
+| Scenario | Without Kalman | With Kalman |
+|----------|----------------|-------------|
+| Standing still | Small oscillations | Stable (velocity → 0) |
+| Walking | Follows each measurement | Smooth trajectory |
+| Noisy scan | Immediate position jump | Weighted blend |
+| User stops | Continues oscillating | Quickly stabilizes |
+
+### When to Use Kalman
+
+**Enable (default):** Continuous tracking, smooth visualization
+**Disable:** Debugging, testing raw positioning accuracy
+
+### Detailed Example: Scan-by-Scan Walkthrough
+
+This example shows exactly how Kalman processes consecutive scans:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    COMPLETE KALMAN CYCLE                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  SCAN 1          SCAN 2          SCAN 3          SCAN 4            │
+│    │               │               │               │                │
+│    ▼               ▼               ▼               ▼                │
+│ ┌─────┐        ┌─────┐        ┌─────┐        ┌─────┐               │
+│ │WiFi │        │WiFi │        │WiFi │        │WiFi │               │
+│ │Centroid      │Centroid      │Centroid      │Centroid             │
+│ │(5.0,5.0)│    │(6.5,5.2)│    │(5.8,5.0)│    │(7.0,5.1)│           │
+│ └──┬──┘        └──┬──┘        └──┬──┘        └──┬──┘               │
+│    │               │               │               │                │
+│    ▼               ▼               ▼               ▼                │
+│ ┌─────────────────────────────────────────────────────────────┐    │
+│ │                     KALMAN FILTER                           │    │
+│ │  1. Calculate dt (time since last scan)                     │    │
+│ │  2. PREDICT: Use velocity to guess position                 │    │
+│ │  3. Calculate Kalman Gain (K)                               │    │
+│ │  4. UPDATE: Blend prediction + measurement                  │    │
+│ │  5. UPDATE VELOCITY: For next prediction                    │    │
+│ │  6. Store state for next scan                               │    │
+│ └──┬──────────────────────────────────────────────────────────┘    │
+│    │                                                                │
+│    ▼                                                                │
+│ ┌─────┐        ┌─────┐        ┌─────┐        ┌─────┐               │
+│ │Final│        │Final│        │Final│        │Final│               │
+│ │(5.0,5.0)│    │(5.6,5.1)│    │(6.04,5.1)│   │(6.5,5.0)│           │
+│ └─────┘        └─────┘        └─────┘        └─────┘               │
+│                                                                     │
+│ Notice: Raw jumped (6.5→5.8→7.0) but Final is smooth!              │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### Scan 2 Detailed Breakdown
+
+```
+INPUTS:
+├── Last State (from Scan 1):
+│   ├── position: (5.0, 5.0)
+│   ├── velocity: (0, 0)
+│   └── timestamp: 1000ms
+│
+├── Current Scan 2:
+│   ├── WiFi centroid: (6.5, 5.2)  ← Raw measurement
+│   ├── RSSI distance: 2.5
+│   └── timestamp: 5000ms
+
+STEP 1: Calculate dt
+├── dt = (5000 - 1000) / 1000 = 4 seconds
+
+STEP 2: PREDICT (using velocity)
+├── predictedX = 5.0 + (0 × 4) = 5.0
+├── predictedY = 5.0 + (0 × 4) = 5.0
+└── predicted: (5.0, 5.0)  ← No movement expected (velocity was 0)
+
+STEP 3: Calculate Kalman Gain (K)
+├── RSSI confidence = 1 - (2.5 / 15) = 0.83  ← Good match
+├── K = 0.4  ← Trust both prediction and measurement
+└── (K depends on P, R matrices internally)
+
+STEP 4: UPDATE (blend prediction + measurement)
+├── innovation_x = 6.5 - 5.0 = 1.5  ← Difference
+├── innovation_y = 5.2 - 5.0 = 0.2
+├── finalX = 5.0 + (0.4 × 1.5) = 5.6  ← Partial correction
+├── finalY = 5.0 + (0.4 × 0.2) = 5.08
+└── FINAL POSITION: (5.6, 5.08)  ← Smoothed!
+
+STEP 5: UPDATE VELOCITY (for next prediction)
+├── velocityX = 0.4 × (1.5 / 4) = 0.15 tiles/sec
+├── velocityY = 0.4 × (0.2 / 4) = 0.02 tiles/sec
+└── velocity: (0.15, 0.02)  ← Now we know user is moving!
+
+STEP 6: Store State
+├── position: (5.6, 5.08)
+├── velocity: (0.15, 0.02)
+└── timestamp: 5000ms
+
+OUTPUT: Blue dot at (5.6, 5.08) ✅
+```
+
+#### Scan 3: Velocity Helps Predict!
+
+```
+INPUTS:
+├── Last State (from Scan 2):
+│   ├── position: (5.6, 5.08)
+│   ├── velocity: (0.15, 0.02)  ← Now we have velocity!
+│   └── timestamp: 5000ms
+│
+├── Current Scan 3:
+│   ├── WiFi centroid: (5.8, 5.0)  ← Noisy jump back?
+│   └── timestamp: 9000ms
+
+STEP 1: Calculate dt
+├── dt = (9000 - 5000) / 1000 = 4 seconds
+
+STEP 2: PREDICT (using velocity)
+├── predictedX = 5.6 + (0.15 × 4) = 6.2  ← Expects forward motion!
+├── predictedY = 5.08 + (0.02 × 4) = 5.16
+└── predicted: (6.2, 5.16)
+
+STEP 3: WiFi says (5.8, 5.0) but we predicted (6.2, 5.16)
+├── innovation_x = 5.8 - 6.2 = -0.4  ← WiFi says go back?
+├── innovation_y = 5.0 - 5.16 = -0.16
+└── This seems like noise...
+
+STEP 4: UPDATE (K = 0.4)
+├── finalX = 6.2 + (0.4 × -0.4) = 6.04
+├── finalY = 5.16 + (0.4 × -0.16) = 5.10
+└── FINAL: (6.04, 5.10)  ← Smooth! Didn't jump back!
+
+STEP 5: UPDATE VELOCITY
+├── velocityX = 0.15 + 0.4 × (-0.4/4) = 0.11  ← Slowing down
+└── velocity: (0.11, 0.004)
+
+OUTPUT: Blue dot at (6.04, 5.10) ✅
+```
+
+#### Visual: What Kalman Prevented
+
+```
+WiFi Raw (jumpy):
+(5.0) ──► (6.5) ──► (5.8) ──► (7.0)
+                      ↑
+                   Jump back! Bad!
+
+Kalman Output (smooth):
+(5.0) ──► (5.6) ──► (6.04) ──► (6.5)
+                      ↑
+              Smooth progression! Good!
+```
+
+**Key insight:** Velocity creates "momentum" - the filter expects continued motion and resists sudden direction changes (noise)!
 
 ---
 
@@ -651,10 +837,10 @@ A low distance value indicates high confidence:
 | **Scan Time** | ~4 seconds (5 scans × 800ms) | ✅ Implemented |
 | **Layer 1** | Multi-scan averaging | ✅ Implemented |
 | **Layer 2** | Weighted centroid (w = 1/(dist + ε)) | ✅ Implemented |
-| **Layer 3** | Obstacle validation (snap to walkable) | ✅ Implemented |
-| **Layer 4** | Fractional display (sub-tile precision) | ✅ Implemented |
-| **Output** | Fractional position (x, y) + topTiles with weights | ✅ Implemented |
-| **Kalman Filter** | Temporal smoothing with velocity model | 🔮 Future |
+| **Layer 3** | Kalman filter (toggle ON/OFF) | ✅ Implemented |
+| **Layer 4** | Obstacle validation (snap to walkable) | ✅ Implemented |
+| **Layer 5** | Fractional display (sub-tile precision) | ✅ Implemented |
+| **Output** | Fractional position + velocity + Kalman metadata | ✅ Implemented |
 | **Approach** | Fingerprint matching (not trilateration) | ✅ Implemented |
 
 ---
@@ -663,10 +849,10 @@ A low distance value indicates high confidence:
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `/src/utils/wifiFingerprintPositioning.js` | Core positioning: weighted centroid + stabilizer | ✅ Active |
-| `/src/components/WifiPositioningPanel.js` | UI + obstacle validation + fractional display | ✅ Active |
+| `/src/utils/wifiFingerprintPositioning.js` | Core positioning + Kalman integration | ✅ Active |
+| `/src/utils/KalmanPositionFilter.js` | 2D Kalman filter with velocity model | ✅ Active |
+| `/src/components/WifiPositioningPanel.js` | UI + Kalman toggle + obstacle validation | ✅ Active |
 | `/src/data/officeGridData.js` | OFFICE_GRID obstacle map + TILE types | ✅ Active |
-| `/src/utils/KalmanPositionFilter.js` | Kalman filter (exists, not integrated) | 🔮 Future |
 
 ---
 
